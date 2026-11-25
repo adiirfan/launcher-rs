@@ -1,6 +1,7 @@
 //! The launcher's drawing kit: everything that can be tested without a phone.
 
 pub mod anim;
+pub mod atlas;
 
 /// A rectangle in pixels, y down.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
