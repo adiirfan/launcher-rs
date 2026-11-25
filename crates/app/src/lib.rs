@@ -302,6 +302,9 @@ fn android_main(app: AndroidApp) {
                 let screen = g.size();
                 let ins = insets(&app, screen, &mut last_insets);
                 icons.begin_frame(r);
+                // Room for every app (plus a row for new installs), so
+                // scrolling never pushes an icon out.
+                r.reserve_icons(g.gl(), home.apps().0.len() + 12, icons.size());
                 let mut moving = false;
                 if !drawer.covers_home(now) && !settings.covers_home(now) {
                     moving |= home.draw(g.gl(), r, &mut batch, &mut icons, screen, ins, now);
@@ -388,6 +391,12 @@ fn android_main(app: AndroidApp) {
                 }
                 let keys = home.apps().0.iter().map(|a| &a.key);
                 background = icons.warm(keys, Duration::from_millis(4)) || icons.has_missing();
+                if !background
+                    && let (Some(g), Some(r)) = (gfx.as_ref().filter(|g| g.has_surface()), renderer.as_mut())
+                {
+                    let keys = home.apps().0.iter().map(|a| &a.key);
+                    background = icons.preload(g.gl(), r, keys, Duration::from_millis(4));
+                }
             }
             let t = Instant::now();
             if drawer.after_frame(&app) {
