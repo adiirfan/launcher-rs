@@ -319,6 +319,14 @@ impl Home {
         }
     }
 
+    /// Android answered the calendar question: the event line stays on
+    /// only if allowed.
+    pub fn calendar_answer(&mut self, _app: &AndroidApp, granted: bool) {
+        let mut s = self.settings;
+        s.events = granted;
+        self.set_settings(s);
+    }
+
     /// Every app, hidden ones included, A to Z.
     pub fn all_apps(&self) -> &[AppRecord] {
         &self.all_records

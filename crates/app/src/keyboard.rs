@@ -14,7 +14,7 @@ use crate::jni_util::with_activity;
 static LATEST: Mutex<Option<ImeState>> = Mutex::new(None);
 static ACTION: Mutex<bool> = Mutex::new(false);
 static HOME: Mutex<bool> = Mutex::new(false);
-static PERMISSION: Mutex<Option<bool>> = Mutex::new(None);
+static PERMISSION: Mutex<Option<(i32, bool)>> = Mutex::new(None);
 static WAKER: OnceLock<AndroidAppWaker> = OnceLock::new();
 
 /// Call once at start so keyboard events can wake the main loop.
@@ -37,9 +37,24 @@ pub fn clear_text(app: &AndroidApp) {
     call_void(app, jni_str!("clearText"), "clearText");
 }
 
+/// Permission request codes, so an answer can be matched to its question.
+pub const CONTACTS: i32 = 1;
+pub const CALENDAR: i32 = 2;
+
 /// Ask Android for the contacts permission; the answer arrives via `take_permission`.
 pub fn ask_contacts(app: &AndroidApp) {
-    call_void(app, jni_str!("askContacts"), "askContacts");
+    ask_permission(app, "android.permission.READ_CONTACTS", CONTACTS);
+}
+
+pub fn ask_permission(app: &AndroidApp, permission: &str, code: i32) {
+    let r = with_activity(app, |env, activity| {
+        let p = env.new_string(permission)?;
+        env.call_method(activity, jni_str!("askPermission"), jni_sig!("(Ljava/lang/String;I)V"), &[JValue::Object(&p), JValue::Int(code)])?;
+        Ok(())
+    });
+    if let Err(e) = r {
+        log::warn!("askPermission failed: {e}");
+    }
 }
 
 fn call_void(app: &AndroidApp, method: &jni::strings::JNIStr, name: &str) {
@@ -57,8 +72,8 @@ pub fn take_home() -> bool {
     std::mem::take(&mut *HOME.lock().unwrap())
 }
 
-/// The answer to the last permission request, once.
-pub fn take_permission() -> Option<bool> {
+/// The answer to the last permission request (its code, and yes or no), once.
+pub fn take_permission() -> Option<(i32, bool)> {
     PERMISSION.lock().unwrap().take()
 }
 
@@ -72,7 +87,7 @@ pub fn take_action() -> bool {
     std::mem::take(&mut *ACTION.lock().unwrap())
 }
 
-fn wake() {
+pub(crate) fn wake() {
     if let Some(w) = WAKER.get() {
         w.wake();
     }
@@ -117,8 +132,9 @@ pub extern "system" fn Java_dev_launcherrs_app_MainActivity_onHome<'l>(_env: Env
 pub extern "system" fn Java_dev_launcherrs_app_MainActivity_onPermission<'l>(
     _env: EnvUnowned<'l>,
     _class: JClass<'l>,
+    code: jint,
     granted: jni::sys::jboolean,
 ) {
-    *PERMISSION.lock().unwrap() = Some(granted);
+    *PERMISSION.lock().unwrap() = Some((code, granted));
     wake();
 }

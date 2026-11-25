@@ -6,6 +6,7 @@ mod render;
 mod jni_util;
 mod apps;
 mod cache;
+mod calendar;
 mod contacts;
 mod drawer;
 mod folder;
@@ -18,6 +19,7 @@ mod settings_pages;
 mod settings_screen;
 mod refresh;
 mod keyboard;
+mod listener;
 mod system;
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -200,9 +202,13 @@ fn android_main(app: AndroidApp) {
                 sched.request_redraw();
             }
         }
-        if let Some(granted) = keyboard::take_permission() {
-            log::info!("contacts permission: {granted}");
-            drawer.permission_answer(&app, granted);
+        if let Some((code, granted)) = keyboard::take_permission() {
+            log::info!("permission {code}: {granted}");
+            match code {
+                keyboard::CONTACTS => drawer.permission_answer(&app, granted),
+                keyboard::CALENDAR => home.calendar_answer(&app, granted),
+                _ => {}
+            }
             sched.request_redraw();
         }
 
