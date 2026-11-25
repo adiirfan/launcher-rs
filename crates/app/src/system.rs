@@ -7,13 +7,40 @@ use jni::{jni_sig, jni_str};
 
 use crate::jni_util::with_activity;
 
-/// "Wed, Nov 25" (or the phone language's equivalent).
-pub fn date_text(app: &AndroidApp) -> Option<String> {
-    let result = with_activity(app, |env, _activity| {
+/// The Holo clock's parts: hours ("10" or "22"), minutes (":42"), and the
+/// date in capitals ("WEDNESDAY, NOVEMBER 25", in the phone's language).
+/// Follows the phone's 12/24-hour setting; 12-hour shows no AM/PM.
+pub fn clock_text(app: &AndroidApp) -> Option<(String, String, String)> {
+    const HOUR: i32 = 10;
+    const HOUR_OF_DAY: i32 = 11;
+    const MINUTE: i32 = 12;
+    let result = with_activity(app, |env, activity| {
+        let cal = env
+            .call_static_method(jni_str!("java/util/Calendar"), jni_str!("getInstance"), jni_sig!("()Ljava/util/Calendar;"), &[])?
+            .l()?;
+        let get = |env: &mut jni::Env, field: i32| -> jni::errors::Result<i32> {
+            env.call_method(&cal, jni_str!("get"), jni_sig!("(I)I"), &[JValue::Int(field)])?.i()
+        };
+        let is24 = env
+            .call_static_method(
+                jni_str!("android/text/format/DateFormat"),
+                jni_str!("is24HourFormat"),
+                jni_sig!("(Landroid/content/Context;)Z"),
+                &[JValue::Object(activity)],
+            )?
+            .z()?;
+        let hours = if is24 {
+            format!("{:02}", get(env, HOUR_OF_DAY)?)
+        } else {
+            let h = get(env, HOUR)?;
+            (if h == 0 { 12 } else { h }).to_string()
+        };
+        let minutes = format!(":{:02}", get(env, MINUTE)?);
+
         let locale = env
             .call_static_method(jni_str!("java/util/Locale"), jni_str!("getDefault"), jni_sig!("()Ljava/util/Locale;"), &[])?
             .l()?;
-        let skeleton = env.new_string("EEEMMMd")?;
+        let skeleton = env.new_string("EEEEMMMMd")?;
         let pattern = env
             .call_static_method(
                 jni_str!("android/text/format/DateFormat"),
@@ -31,10 +58,13 @@ pub fn date_text(app: &AndroidApp) -> Option<String> {
         let text = env
             .call_method(&format, jni_str!("format"), jni_sig!("(Ljava/util/Date;)Ljava/lang/String;"), &[JValue::Object(&date)])?
             .l()?;
-        let text = env.cast_local::<JString>(text)?;
-        Ok(String::from(text.mutf8_chars(env)?))
+        let upper = env
+            .call_method(&text, jni_str!("toUpperCase"), jni_sig!("(Ljava/util/Locale;)Ljava/lang/String;"), &[JValue::Object(&locale)])?
+            .l()?;
+        let upper = env.cast_local::<JString>(upper)?;
+        Ok((hours, minutes, String::from(upper.mutf8_chars(env)?)))
     });
-    result.map_err(|e| log::warn!("date: {e}")).ok()
+    result.map_err(|e| log::warn!("clock: {e}")).ok()
 }
 
 /// Pull down the notification shade, as a swipe down on Home does on Pixels.

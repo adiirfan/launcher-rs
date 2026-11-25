@@ -1,11 +1,12 @@
-//! The modern home screen: date, pages of icons, dock, search pill.
+//! The Holo home screen: clock, pages of icons, dock with the all-apps
+//! button, and the search bar along the bottom.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use android_activity::AndroidApp;
 use launcher_core::applist::AppRecord;
-use launcher_core::geometry::{DOCK_SLOTS, HomeMetrics, Hit, Insets};
+use launcher_core::geometry::{ALL_APPS_SLOT, CLOCK_SP, DOCK_SLOTS, HOLO_COLS, HOLO_ROWS, HomeMetrics, Hit, Insets};
 use launcher_core::home::{AppKey, HomeLayout};
 use launcher_core::pager::{Gesture, Pager};
 use launcher_draw::batch::Batch;
@@ -13,6 +14,8 @@ use launcher_draw::{Rect, Rgba};
 
 use crate::apps;
 use crate::cache::Store;
+use crate::fonts::Weight;
+use crate::holo::{self, ACCENT, BLACK, WHITE};
 use crate::icons::Icons;
 use crate::render::Renderer;
 use crate::system;
@@ -46,13 +49,14 @@ pub enum Action {
 enum Target {
     Cell { page: usize, col: u32, row: u32 },
     Dock(u32),
-    Pill,
+    AllApps,
+    Search,
 }
 
 /// A vertical swipe this long (dp) opens the shade or the app list.
 const SWIPE_DP: f32 = 80.0;
-const LABEL_DP: f32 = 12.5;
-const DATE_DP: f32 = 28.0;
+const LABEL_SP: f32 = 13.0;
+const DATE_SP: f32 = 14.0;
 
 pub struct Home {
     store: Store,
@@ -67,7 +71,8 @@ pub struct Home {
     pager: Pager,
     metrics: Option<(HomeMetrics, (i32, i32), Insets)>,
     pressed: Option<Target>,
-    date: String,
+    /// Hours, ":minutes", and the date in capitals.
+    clock: (String, String, String),
     density: f32,
 }
 
@@ -96,6 +101,10 @@ impl Home {
             layout
         });
         let mut layout = layout;
+        if layout.reflow(HOLO_COLS, HOLO_ROWS) {
+            store.save_layout(&layout);
+            log::info!("layout: reflowed to {HOLO_COLS}x{HOLO_ROWS}, {} page(s)", layout.pages.len());
+        }
         let installed: HashSet<AppKey> = records.iter().map(|r| r.key.clone()).collect();
         if layout.remove_missing(&installed) {
             store.save_layout(&layout);
@@ -103,7 +112,7 @@ impl Home {
         }
         let labels = records.iter().map(|r| (r.key.clone(), r.label.clone())).collect();
         let pager = Pager::new(layout.pages.len(), 1.0);
-        let date = system::date_text(app).unwrap_or_default();
+        let clock = system::clock_text(app).unwrap_or_default();
         log::info!("home loaded in {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
         Home {
             store,
@@ -116,7 +125,7 @@ impl Home {
             pager,
             metrics: None,
             pressed: None,
-            date,
+            clock,
             density,
         }
     }
@@ -163,11 +172,11 @@ impl Home {
         true
     }
 
-    /// Re-read today's date. True if it changed.
-    pub fn update_date(&mut self, app: &AndroidApp) -> bool {
-        match system::date_text(app) {
-            Some(d) if d != self.date => {
-                self.date = d;
+    /// Re-read the time and date. True if what's shown changed.
+    pub fn update_clock(&mut self, app: &AndroidApp) -> bool {
+        match system::clock_text(app) {
+            Some(c) if c != self.clock => {
+                self.clock = c;
                 true
             }
             _ => false,
@@ -203,15 +212,16 @@ impl Home {
         Some(match m.hit(x, y)? {
             Hit::Cell { col, row } => Target::Cell { page: self.pager.page(), col, row },
             Hit::Dock(i) => Target::Dock(i),
-            Hit::Pill => Target::Pill,
+            Hit::AllApps => Target::AllApps,
+            Hit::Search => Target::Search,
         })
     }
 
     fn app_at(&self, t: Target) -> Option<&AppKey> {
         match t {
             Target::Cell { page, col, row } => self.layout.slot(page, col, row),
-            Target::Dock(i) => self.layout.dock.get(i as usize)?.as_ref(),
-            Target::Pill => None,
+            Target::Dock(i) if i != ALL_APPS_SLOT => self.layout.dock.get(i as usize)?.as_ref(),
+            _ => None,
         }
     }
 
@@ -222,7 +232,9 @@ impl Home {
         match t.kind {
             TouchKind::Down => {
                 self.pager.touch_down(t.x, t.y, t.t);
-                self.pressed = self.target_at(t.x, t.y).filter(|&tg| tg == Target::Pill || self.app_at(tg).is_some());
+                self.pressed = self
+                    .target_at(t.x, t.y)
+                    .filter(|&tg| matches!(tg, Target::Search | Target::AllApps) || self.app_at(tg).is_some());
                 Action::None
             }
             TouchKind::Move => {
@@ -237,7 +249,8 @@ impl Home {
                 let swipe = SWIPE_DP * self.density;
                 match self.pager.touch_up(t.x, t.y, t.t) {
                     Gesture::Tap { x, y } => match (pressed, self.target_at(x, y)) {
-                        (Some(Target::Pill), Some(Target::Pill)) => Action::OpenSearch,
+                        (Some(Target::Search), Some(Target::Search)) => Action::OpenSearch,
+                        (Some(Target::AllApps), Some(Target::AllApps)) => Action::OpenAppList,
                         (Some(p), Some(now)) if p == now => self.app_at(p).cloned().map_or(Action::None, Action::Launch),
                         _ => Action::None,
                     },
@@ -254,12 +267,12 @@ impl Home {
         }
     }
 
-    /// Text with a soft dark shadow so it reads on light wallpapers.
+    /// Text with a dark shadow under it so it reads on light wallpapers.
     #[allow(clippy::too_many_arguments)]
-    fn shadowed(&self, gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, s: &str, x: f32, baseline: f32, em: f32, max_w: f32, bold: bool) {
+    fn shadowed(&self, gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, s: &str, x: f32, baseline: f32, em: f32, spacing: f32, max_w: f32, color: Rgba, weight: Weight) -> f32 {
         let d = self.density;
-        r.text(gl, batch, s, x + 0.5 * d, baseline + 1.0 * d, em, max_w, Rgba::hex(0x000000).with_alpha(0.45), bold);
-        r.text(gl, batch, s, x, baseline, em, max_w, Rgba::hex(0xFFFFFF), bold);
+        r.text_spaced(gl, batch, s, x, baseline + 1.0 * d, em, spacing, max_w, Rgba::hex(BLACK).with_alpha(0.5), weight);
+        r.text_spaced(gl, batch, s, x, baseline, em, spacing, max_w, color, weight)
     }
 
     /// Build the frame. Returns true while something is still moving.
@@ -270,14 +283,26 @@ impl Home {
         let size = m.icon.round() as u32;
         let m_icon = size as f32;
         icons.set_size(size);
+        let white = Rgba::hex(WHITE);
+        let accent = Rgba::hex(ACCENT);
 
-        // Date.
-        let date = self.date.clone();
-        self.shadowed(gl, r, batch, &date, m.date_left, m.date_baseline, DATE_DP * d, m.screen_w - m.date_left * 2.0, false);
+        // Clock: bold hours, light minutes in the accent colour, centred.
+        let (hours, minutes, date) = self.clock.clone();
+        let em = CLOCK_SP * d;
+        let tight = -2.0 * d;
+        let hw = r.measure_spaced(&hours, em, tight, Weight::Bold);
+        let mw = r.measure_spaced(&minutes, em, tight, Weight::Light);
+        let x0 = (m.screen_w - hw - mw - tight) / 2.0;
+        self.shadowed(gl, r, batch, &hours, x0, m.clock_baseline, em, tight, m.screen_w, white, Weight::Bold);
+        self.shadowed(gl, r, batch, &minutes, x0 + hw + tight, m.clock_baseline, em, tight, m.screen_w, accent, Weight::Light);
+        let em = DATE_SP * d;
+        let spacing = 1.5 * d;
+        let dw = r.measure_spaced(&date, em, spacing, Weight::Regular).min(m.screen_w - 32.0 * d);
+        self.shadowed(gl, r, batch, &date, (m.screen_w - dw) / 2.0, m.date_baseline, em, spacing, m.screen_w - 32.0 * d, Rgba::hex(holo::DATE), Weight::Regular);
 
         // Pages: the current one, plus its neighbour while swiping.
         let offset = self.pager.offset(now);
-        let label_em = LABEL_DP * d;
+        let label_em = LABEL_SP * d;
         let label_ascent = r.ascent(label_em);
         let label_max = m.cell_w - 8.0 * d;
         for page in 0..self.layout.pages.len() {
@@ -294,52 +319,59 @@ impl Home {
                     icons.draw(gl, r, batch, &key, (ir.0, ir.1, m_icon), pressed, 1.0);
                     let label = self.labels.get(&key).cloned().unwrap_or_default();
                     if !label.is_empty() {
-                        let lw = r.measure(&label, label_em, label_max, false);
+                        let lw = r.measure(&label, label_em, label_max, Weight::Regular);
                         let cx = ir.0 + m_icon / 2.0;
                         let baseline = ir.1 + m_icon + m.label_gap + label_ascent;
-                        self.shadowed(gl, r, batch, &label, cx - lw / 2.0, baseline, label_em, label_max, false);
+                        self.shadowed(gl, r, batch, &label, cx - lw / 2.0, baseline, label_em, 0.0, label_max, white, Weight::Regular);
                     }
                 }
             }
         }
 
-        // Page dots, only when there's more than one page.
+        // Page bar: a thin track with the current page's share lit up.
         let pages = self.layout.pages.len();
         if pages > 1 {
-            let gap = 12.0 * d;
-            let radius = 3.0 * d;
-            let current = (offset / m.screen_w).round().clamp(0.0, (pages - 1) as f32) as usize;
-            let x0 = m.screen_w / 2.0 - gap * (pages - 1) as f32 / 2.0;
-            for i in 0..pages {
-                let alpha = if i == current { 1.0 } else { 0.4 };
-                batch.circle(x0 + gap * i as f32, m.dots_y, radius, Rgba::hex(0xFFFFFF).with_alpha(alpha));
-            }
+            let (bx, by, bw, bh) = m.page_bar;
+            batch.rect(Rect::new(bx, by, bw, bh), white.with_alpha(0.14), 0.0);
+            let thumb = bw / pages as f32;
+            let at = (offset / m.screen_w).clamp(0.0, (pages - 1) as f32);
+            batch.rect(Rect::new(bx + at * thumb, by, thumb, bh), accent, 0.0);
         }
 
-        // Dock, no labels.
+        // Dock: a line across the top, two apps, the all-apps button, two apps.
+        batch.rect(Rect::new(0.0, m.dock_top, m.screen_w, 1.0 * d), white.with_alpha(0.18), 0.0);
         for i in 0..DOCK_SLOTS {
+            if i == ALL_APPS_SLOT {
+                continue;
+            }
             let Some(key) = self.layout.dock[i as usize].clone() else { continue };
             let pressed = self.pressed == Some(Target::Dock(i));
             let ir = m.dock_icon_rect(i);
-            icons.draw(gl, r, batch, &key, (ir.0, ir.1, m_icon), pressed, 1.0);
+            icons.draw(gl, r, batch, &key, (ir.0, ir.1, ir.2), pressed, 1.0);
+        }
+        let (ax, ay, aw, _) = m.all_apps_rect();
+        let (cx, cy, rad) = (ax + aw / 2.0, ay + aw / 2.0, aw / 2.0);
+        let dim = if self.pressed == Some(Target::AllApps) { 0.6 } else { 1.0 };
+        batch.circle(cx, cy, rad, Rgba::hex(BLACK).with_alpha(0.4));
+        batch.outline(Rect::new(ax, ay, aw, aw), white.with_alpha(0.9 * dim), rad, 2.0 * d);
+        let (sq_w, sq_h, gap) = (6.0 * d, 7.5 * d, 3.0 * d);
+        for row in 0..2 {
+            for col in 0..3 {
+                let x = cx - 12.0 * d + col as f32 * (sq_w + gap);
+                let y = cy - 9.0 * d + row as f32 * (sq_h + gap);
+                batch.rect(Rect::new(x, y, sq_w, sq_h), white.with_alpha(dim), 0.0);
+            }
         }
 
-        // Search pill.
-        let (px, py, pw, ph) = m.pill;
-        let pill_alpha = if self.pressed == Some(Target::Pill) { 0.7 } else { 0.85 };
-        batch.rect(Rect::new(px, py, pw, ph), Rgba::hex(0x101413).with_alpha(pill_alpha), ph / 2.0);
-        let ink = Rgba::hex(0xE3EEEA).with_alpha(0.9);
-        let (gx, gy) = (px + 22.0 * d, py + ph / 2.0 - 1.5 * d);
-        let lens = 7.0 * d;
-        batch.outline(Rect::new(gx - lens, gy - lens, lens * 2.0, lens * 2.0), ink, lens, 2.0 * d);
-        for step in [1.0f32, 1.6, 2.2] {
-            let o = lens * 0.72 + step * 2.0 * d;
-            batch.circle(gx + o, gy + o, 1.4 * d, ink);
-        }
-        let hint_em = 15.0 * d;
-        let baseline = py + ph / 2.0 + r.ascent(hint_em) / 2.0 - 1.0 * d;
-        let hint_x = gx + lens + 14.0 * d;
-        r.text(gl, batch, "Search apps, contacts, settings", hint_x, baseline, hint_em, px + pw - hint_x - 20.0 * d, ink, false);
+        // Search bar along the bottom.
+        let (sx, sy, sw, sh) = m.search;
+        let fill = if self.pressed == Some(Target::Search) { 0.18 } else { 0.10 };
+        batch.rect(Rect::new(sx, sy, sw, sh), white.with_alpha(fill), 2.0 * d);
+        let hint = Rgba::hex(holo::HINT);
+        holo::magnifier(batch, sx + 16.0 * d + 11.0 * d, sy + sh / 2.0, d, hint);
+        let em = 17.0 * d;
+        let tx = sx + 16.0 * d + 22.0 * d + 14.0 * d;
+        r.text(gl, batch, "Search apps", tx, sy + sh / 2.0 + r.ascent(em) / 2.0 - 1.0 * d, em, sx + sw - tx - 16.0 * d, hint, Weight::Light);
 
         self.pager.animating(now) || self.pager.dragging_pages()
     }

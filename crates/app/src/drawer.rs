@@ -1,5 +1,5 @@
-//! The app list: every app A to Z, and search across apps, settings pages
-//! and contacts. It slides up over Home.
+//! The Holo app list: every app A to Z, and search across apps, settings
+//! pages and contacts. It slides up over Home.
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -15,6 +15,8 @@ use launcher_draw::batch::Batch;
 use launcher_draw::{Rect, Rgba};
 
 use crate::contacts::{self, Contact};
+use crate::fonts::Weight;
+use crate::holo::{self, ACCENT, BLACK, WHITE};
 use crate::home::{Touch, TouchKind};
 use crate::icons::Icons;
 use crate::render::Renderer;
@@ -25,11 +27,6 @@ const CLOSE: Duration = Duration::from_millis(180);
 const PULL_CLOSE_DP: f32 = 80.0;
 const MAX_CONTACTS: usize = 5;
 
-const SURFACE2: u32 = 0x101917;
-const ON: u32 = 0xE3EEEA;
-const MUTED: u32 = 0xA9BDB6;
-const ACCENT: u32 = 0x9CC9B8;
-const DOT_BG: u32 = 0x14211E;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DrawerAction {
@@ -64,7 +61,7 @@ enum Row {
 enum Target {
     Field,
     Clear,
-    Back,
+    HomeBar,
     App(usize),
     Row(Row),
 }
@@ -267,16 +264,21 @@ impl Drawer {
         56.0 * self.density
     }
 
-    /// Where the extras (no-match line, rows, footnote) start, below the grid,
-    /// in list coordinates (before scrolling).
+    /// The section title's height ("ON THIS PHONE" and its line).
+    fn title_h(&self) -> f32 {
+        28.0 * self.density
+    }
+
+    /// Below the grid, in list coordinates (before scrolling): where the grid
+    /// ends, where the result rows start, their total height, and the end.
     fn extras_layout(&self, m: &DrawerMetrics) -> (f32, f32, f32, f32) {
         let d = self.density;
         let grid_rows = self.results.len().div_ceil(COLS);
         let grid_end = m.pad_top + grid_rows as f32 * m.row_h;
-        let no_match = if self.has_query() && self.results.is_empty() { 40.0 * d } else { 0.0 };
-        let rows_top = grid_end + no_match + 24.0 * d;
+        let no_match = if self.has_query() && self.results.is_empty() { 36.0 * d } else { 0.0 };
+        let rows_top = grid_end + no_match + 20.0 * d + self.title_h();
         let rows_h = self.rows().len() as f32 * self.row_h();
-        (grid_end, rows_top, rows_h, rows_top + rows_h + 14.0 * d + 20.0 * d)
+        (grid_end, rows_top, rows_h, rows_top + rows_h + 16.0 * d)
     }
 
     fn metrics_for(&mut self, screen: (i32, i32), insets: Insets, icon: u32) -> DrawerMetrics {
@@ -302,8 +304,8 @@ impl Drawer {
     }
 
     fn clear_rect(&self, m: &DrawerMetrics) -> (f32, f32, f32, f32) {
-        let s = 48.0 * self.density;
-        (m.field.0 + m.field.2 - s - 4.0 * self.density, m.field.1 + (m.field.3 - s) / 2.0, s, s)
+        let s = 44.0 * self.density;
+        (m.field.0 + m.field.2 - s, m.field.1, s, s)
     }
 
     fn target_at(&self, x: f32, y: f32, now: Instant) -> Option<Target> {
@@ -314,8 +316,8 @@ impl Drawer {
         if Self::inside(m.field, x, y) {
             return Some(Target::Field);
         }
-        if Self::inside(m.back_button, x, y) {
-            return Some(Target::Back);
+        if Self::inside(m.home_bar, x, y) {
+            return Some(Target::HomeBar);
         }
         let scroll = self.scroller.offset(now);
         if let Some(i) = m.hit_cell(x, y, scroll, self.results.len()) {
@@ -326,7 +328,7 @@ impl Drawer {
         }
         let (_, rows_top, rows_h, _) = self.extras_layout(&m);
         let ly = y - m.list_top + scroll - rows_top;
-        let side = 8.0 * self.density + m.list_left;
+        let side = 12.0 * self.density + m.list_left;
         if ly >= 0.0 && ly < rows_h && x >= side && x < m.screen_w - side {
             return self.rows().get((ly / self.row_h()) as usize).map(|&r| Target::Row(r));
         }
@@ -378,7 +380,7 @@ impl Drawer {
                 self.set_query("");
                 DrawerAction::ClearText
             }
-            Target::Back => DrawerAction::Close,
+            Target::HomeBar => DrawerAction::Close,
             Target::App(i) => self.results.get(i).map_or(DrawerAction::None, |&a| DrawerAction::Launch(apps[a].key.clone())),
             Target::Row(Row::Settings(i)) => self.settings.get(i).map_or(DrawerAction::None, |p| DrawerAction::OpenSettings(p.action)),
             Target::Row(Row::Contact(i)) => self.contacts.get(i).map_or(DrawerAction::None, |c| DrawerAction::OpenContact(c.clone())),
@@ -411,17 +413,19 @@ impl Drawer {
         let lift = (1.0 - p) * 0.15 * m.screen_h;
         let scroll = self.scroller.offset(now);
         let (sw, sh) = (m.screen_w, m.screen_h);
+        let white = Rgba::hex(WHITE).with_alpha(fade);
+        let accent = Rgba::hex(ACCENT).with_alpha(fade);
+        let black = Rgba::hex(BLACK).with_alpha(fade);
 
-        batch.rect(Rect::new(0.0, 0.0, sw, sh), Rgba::hex(0x000000).with_alpha(fade), 0.0);
+        batch.rect(Rect::new(0.0, 0.0, sw, sh), black, 0.0);
 
-        // The grid: only rows that are at least partly on screen (the list
-        // shows through the navigation bar, so down to the screen's edge).
-        let label_em = 12.5 * d;
+        // The grid: only rows that are at least partly on screen.
+        let label_em = 13.0 * d;
         let label_ascent = r.ascent(label_em);
         let label_max = m.cell_w - 8.0 * d;
         let top = scroll - m.pad_top;
         let first_row = (top / m.row_h).floor().max(0.0) as usize;
-        let last_row = ((top + sh - m.list_top - lift) / m.row_h).floor().max(0.0) as usize;
+        let last_row = ((top + m.home_bar.1 - m.list_top - lift) / m.row_h).floor().max(0.0) as usize;
         let start = first_row * COLS;
         let end = ((last_row + 1) * COLS).min(self.results.len());
         for slot in start..end {
@@ -431,116 +435,116 @@ impl Drawer {
             let pressed = self.pressed == Some(Target::App(slot));
             icons.draw(gl, r, batch, &rec.key, (ix, iy, is), pressed, fade);
             if !rec.label.is_empty() {
-                let lw = r.measure(&rec.label, label_em, label_max, false);
+                let lw = r.measure(&rec.label, label_em, label_max, Weight::Regular);
                 let baseline = iy + is + m.label_gap + label_ascent;
-                r.text(gl, batch, &rec.label, ix + is / 2.0 - lw / 2.0, baseline, label_em, label_max, Rgba::hex(ON).with_alpha(fade), false);
+                r.text(gl, batch, &rec.label, ix + is / 2.0 - lw / 2.0, baseline, label_em, label_max, white, Weight::Regular);
             }
         }
 
-        // Below the grid when searching: no-match line, settings, contacts, footnote.
+        // Below the grid when searching: no-match line, then ON THIS PHONE.
         if self.has_query() {
             let (grid_end, rows_top, rows_h, _) = self.extras_layout(&m);
             let y0 = m.list_top - scroll + lift;
-            let left = m.list_left + 8.0 * d;
+            let left = m.list_left + 12.0 * d;
             let width = sw - 2.0 * left;
             let quoted = format!("\u{201C}{}\u{201D}", self.query.trim());
             if self.results.is_empty() {
                 let text = format!("No apps called {quoted}");
-                r.text(gl, batch, &text, left, y0 + grid_end + 8.0 * d + r.ascent(15.0 * d), 15.0 * d, width, Rgba::hex(MUTED).with_alpha(fade), false);
+                let em = 16.0 * d;
+                r.text(gl, batch, &text, left, y0 + grid_end + 4.0 * d + r.ascent(em), em, width, Rgba::hex(holo::QUIET).with_alpha(fade), Weight::Light);
             }
+            let title_bottom = y0 + rows_top;
+            let em = 13.0 * d;
+            r.text_spaced(gl, batch, "ON THIS PHONE", left, title_bottom - 7.0 * d, em, 0.6 * d, width, accent, Weight::Bold);
+            batch.rect(Rect::new(left, title_bottom - 1.0 * d, width, 1.0 * d), accent, 0.0);
             let rows = self.rows();
-            let top = y0 + rows_top;
-            batch.rect(Rect::new(left, top, width, rows_h), Rgba::hex(SURFACE2).with_alpha(fade), 20.0 * d);
+            let row_em = 17.0 * d;
+            let row_ascent = r.ascent(row_em);
             for (i, row) in rows.iter().enumerate() {
-                let ry = top + i as f32 * self.row_h();
-                if i > 0 {
-                    batch.rect(Rect::new(left, ry - 1.0 * d, width, 2.0 * d), Rgba::hex(0x000000).with_alpha(fade), 0.0);
-                }
+                let ry = title_bottom + i as f32 * self.row_h();
                 let pressed = self.pressed == Some(Target::Row(*row));
-                let ink = Rgba::hex(ON).with_alpha(fade * if pressed { 0.6 } else { 1.0 });
-                let (cx, cy) = (left + 16.0 * d + 14.0 * d, ry + self.row_h() / 2.0);
-                let text_x = cx + 14.0 * d + 14.0 * d;
-                let baseline = cy + r.ascent(15.0 * d) / 2.0 - 1.0 * d;
-                let max = left + width - text_x - 16.0 * d;
-                let accent = Rgba::hex(ACCENT).with_alpha(fade);
-                match *row {
-                    Row::Settings(s) => {
-                        let rr = 9.0 * d;
-                        batch.outline(Rect::new(cx - rr, cy - rr, rr * 2.0, rr * 2.0), accent, rr, 2.5 * d);
-                        batch.circle(cx, cy, 2.5 * d, accent);
-                        r.text(gl, batch, self.settings[s].label, text_x, baseline, 15.0 * d, max, ink, false);
-                    }
-                    Row::Contact(c) => {
-                        let name = &self.contacts[c].name;
-                        batch.circle(cx, cy, 14.0 * d, Rgba::hex(DOT_BG).with_alpha(fade));
-                        let initial: String = name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
-                        let iw = r.measure(&initial, 14.0 * d, 28.0 * d, true);
-                        r.text(gl, batch, &initial, cx - iw / 2.0, cy + r.ascent(14.0 * d) / 2.0 - 1.0 * d, 14.0 * d, 28.0 * d, accent, true);
-                        r.text(gl, batch, name, text_x, baseline, 15.0 * d, max, ink, false);
-                    }
-                    Row::ContactsPrompt => {
-                        let rr = 6.0 * d;
-                        batch.outline(Rect::new(cx - rr, cy - rr - 3.0 * d, rr * 2.0, rr * 2.0), accent, rr, 2.0 * d);
-                        batch.rect(Rect::new(cx - 9.0 * d, cy + 5.0 * d, 18.0 * d, 7.0 * d), accent, 4.0 * d);
-                        let text = match self.permission {
+                if pressed {
+                    batch.rect(Rect::new(left, ry, width, self.row_h()), accent.with_alpha(0.25 * fade), 0.0);
+                }
+                batch.rect(Rect::new(left, ry + self.row_h() - 1.0 * d, width, 1.0 * d), Rgba::hex(holo::ROW_LINE).with_alpha(fade), 0.0);
+                let baseline = ry + self.row_h() / 2.0 + row_ascent / 2.0 - 1.0 * d;
+                let tx = left + 4.0 * d;
+                let (text, kind) = match *row {
+                    Row::Settings(s) => (self.settings[s].label.to_string(), "SETTINGS"),
+                    Row::Contact(c) => (self.contacts[c].name.clone(), "CONTACT"),
+                    Row::ContactsPrompt => (
+                        match self.permission {
                             Permission::Refused { can_ask: true } => "Contacts are off. Tap to allow.".to_string(),
                             Permission::Refused { can_ask: false } => "Contacts are off. Tap for Settings.".to_string(),
                             _ => format!("Search contacts for {quoted}"),
-                        };
-                        r.text(gl, batch, &text, text_x, baseline, 15.0 * d, max, ink, false);
-                    }
+                        },
+                        "",
+                    ),
+                };
+                let kind_em = 11.0 * d;
+                let kind_w = if kind.is_empty() { 0.0 } else { r.measure_spaced(kind, kind_em, 0.6 * d, Weight::Medium) };
+                r.text(gl, batch, &text, tx, baseline, row_em, width - kind_w - 20.0 * d, white, Weight::Light);
+                if !kind.is_empty() {
+                    let kx = left + width - kind_w - 4.0 * d;
+                    r.text_spaced(gl, batch, kind, kx, baseline, kind_em, 0.6 * d, kind_w + 1.0, Rgba::hex(holo::PLACEHOLDER).with_alpha(fade), Weight::Medium);
                 }
             }
-            let note_y = top + rows_h + 14.0 * d + r.ascent(13.0 * d);
-            r.text(gl, batch, "Search stays on this phone. Nothing is sent to the web.", left, note_y, 13.0 * d, width, Rgba::hex(MUTED).with_alpha(fade), false);
+            let _ = rows_h;
         }
 
-        // Cover whatever scrolled up behind the search field.
-        batch.rect(Rect::new(0.0, 0.0, sw, m.list_top + lift), Rgba::hex(0x000000).with_alpha(fade), 0.0);
+        // Cover whatever scrolled up behind the header and field, and down
+        // behind the HOME bar.
+        batch.rect(Rect::new(0.0, 0.0, sw, m.list_top + lift), black, 0.0);
+        let (hx, hy, hw, hh) = m.home_bar;
+        batch.rect(Rect::new(hx, hy + lift, hw, sh - hy), black, 0.0);
 
-        // Search field.
+        // Header: APPS, with the accent bar under it.
+        let (hdx, hdy, hdw, hdh) = m.header;
+        let hdy = hdy + lift;
+        let em = 14.0 * d;
+        let tw = r.measure_spaced("APPS", em, 0.6 * d, Weight::Medium);
+        r.text_spaced(gl, batch, "APPS", hdx + (hdw - tw) / 2.0, hdy + (hdh - 4.0 * d) / 2.0 + r.ascent(em) / 2.0, em, 0.6 * d, hdw, white, Weight::Medium);
+        batch.rect(Rect::new(hdx, hdy + hdh - 4.0 * d, hdw, 4.0 * d), accent, 0.0);
+        batch.rect(Rect::new(0.0, hdy + hdh, sw, 1.0 * d), Rgba::hex(holo::DIVIDER).with_alpha(fade), 0.0);
+
+        // Search field: magnifier, text, caret, clear, accent underline.
         let (fx, fy, fw, fh) = m.field;
         let fy = fy + lift;
-        batch.rect(Rect::new(fx, fy, fw, fh), Rgba::hex(SURFACE2).with_alpha(fade), fh / 2.0);
-        let muted = Rgba::hex(MUTED).with_alpha(fade);
-        let (gx, gy) = (fx + 20.0 * d + 7.0 * d, fy + fh / 2.0 - 1.5 * d);
-        let lens = 7.0 * d;
-        batch.outline(Rect::new(gx - lens, gy - lens, lens * 2.0, lens * 2.0), muted, lens, 2.0 * d);
-        for step in [1.0f32, 1.6, 2.2] {
-            let o = lens * 0.72 + step * 2.0 * d;
-            batch.circle(gx + o, gy + o, 1.4 * d, muted);
-        }
-        let em = 16.0 * d;
-        let tx = gx + lens + 12.0 * d;
+        let quiet = Rgba::hex(holo::PLACEHOLDER).with_alpha(fade);
+        holo::magnifier(batch, fx + 11.0 * d, fy + fh / 2.0, d, quiet);
+        let em = 17.0 * d;
+        let tx = fx + 22.0 * d + 10.0 * d;
         let baseline = fy + fh / 2.0 + r.ascent(em) / 2.0 - 1.0 * d;
-        let text_max = fx + fw - tx - 56.0 * d;
+        let text_max = fx + fw - tx - 48.0 * d;
         let typed_w = if self.query.is_empty() {
-            r.text(gl, batch, "Search apps", tx, baseline, em, text_max, Rgba::hex(MUTED).with_alpha(fade * 0.75), false);
+            r.text(gl, batch, "Search apps", tx, baseline, em, text_max, quiet, Weight::Light);
             0.0
         } else {
-            r.text(gl, batch, &self.query, tx, baseline, em, text_max, Rgba::hex(ON).with_alpha(fade), false)
+            r.text(gl, batch, &self.query, tx, baseline, em, text_max, white, Weight::Light)
         };
         if self.focused {
-            let ch = 20.0 * d;
-            batch.rect(Rect::new(tx + typed_w + 1.0 * d, fy + (fh - ch) / 2.0, 2.0 * d, ch), Rgba::hex(ACCENT).with_alpha(fade), 0.0);
+            let ch = 22.0 * d;
+            batch.rect(Rect::new(tx + typed_w + 1.0 * d, fy + (fh - ch) / 2.0, 2.0 * d, ch), accent, 0.0);
         }
         if self.has_query() {
-            let (cx, cy, cw, ch) = self.clear_rect(&m);
-            let em = 20.0 * d;
-            let xw = r.measure("\u{00D7}", em, cw, false);
+            let (cx, _, cw, ch) = self.clear_rect(&m);
+            let em = 22.0 * d;
+            let xw = r.measure("\u{00D7}", em, cw, Weight::Light);
             let alpha = if self.pressed == Some(Target::Clear) { 0.5 } else { 1.0 };
-            r.text(gl, batch, "\u{00D7}", cx + (cw - xw) / 2.0, cy + lift + ch / 2.0 + r.ascent(em) / 2.0 - 1.0 * d, em, cw, Rgba::hex(MUTED).with_alpha(fade * alpha), false);
+            r.text(gl, batch, "\u{00D7}", cx + (cw - xw) / 2.0, fy + ch / 2.0 + r.ascent(em) / 2.0 - 1.0 * d, em, cw, quiet.with_alpha(fade * alpha), Weight::Light);
         }
+        batch.rect(Rect::new(fx, fy + fh - 2.0 * d, fw, 2.0 * d), accent, 0.0);
 
-        // Back to Home.
-        let (bx, by, bw, bh) = m.back_button;
-        let by = by + lift;
-        let alpha = if self.pressed == Some(Target::Back) { 0.7 } else { 1.0 };
-        batch.rect(Rect::new(bx, by, bw, bh), Rgba::hex(SURFACE2).with_alpha(fade * alpha), bh / 2.0);
+        // HOME bar.
+        let hy = hy + lift;
+        let pressed = self.pressed == Some(Target::HomeBar);
+        if pressed {
+            batch.rect(Rect::new(hx, hy, hw, hh), accent.with_alpha(0.25 * fade), 0.0);
+        }
+        batch.rect(Rect::new(hx, hy, hw, 1.0 * d), Rgba::hex(holo::DIVIDER).with_alpha(fade), 0.0);
         let em = 14.0 * d;
-        let label = "Back to Home";
-        let lw = r.measure(label, em, bw, true);
-        r.text(gl, batch, label, bx + (bw - lw) / 2.0, by + bh / 2.0 + r.ascent(em) / 2.0 - 1.0 * d, em, bw, Rgba::hex(ON).with_alpha(fade), true);
+        let tw = r.measure_spaced("HOME", em, 0.6 * d, Weight::Medium);
+        r.text_spaced(gl, batch, "HOME", hx + (hw - tw) / 2.0, hy + hh / 2.0 + r.ascent(em) / 2.0 - 1.0 * d, em, 0.6 * d, hw, white, Weight::Medium);
 
         self.animating(now)
     }

@@ -205,7 +205,8 @@ impl Renderer {
                 glyphs: Atlas::new(gl, glow::R8, glow::RED, GLYPH_ATLAS),
                 icon_slots: None,
                 glyph_keys: HashMap::new(),
-                fonts: [None, None, None, None],
+                // Regular is needed by every screen (and for line heights): load it now.
+                fonts: [None, Some(fonts::load_weight(Weight::Regular)), None, None],
                 last_log: Instant::now() - Duration::from_secs(60),
                 redraw: false,
             }
@@ -302,8 +303,8 @@ impl Renderer {
     }
 
     /// Height from baseline to the top of capitals-and-ascenders for `em_px`.
-    pub fn ascent(&mut self, em_px: f32) -> f32 {
-        let fonts = self.font(Weight::Regular);
+    pub fn ascent(&self, em_px: f32) -> f32 {
+        let fonts = self.fonts[Weight::Regular as usize].as_ref().expect("loaded in new");
         fonts.ascent(fonts.px_for_em(em_px))
     }
 

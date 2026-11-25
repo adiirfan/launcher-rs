@@ -9,6 +9,7 @@ mod cache;
 mod contacts;
 mod drawer;
 mod fonts;
+mod holo;
 mod home;
 mod icons;
 mod settings_pages;
@@ -181,7 +182,7 @@ fn android_main(app: AndroidApp) {
         let m = current_minute();
         if m != minute {
             minute = m;
-            if home.update_date(&app) {
+            if home.update_clock(&app) {
                 sched.request_redraw();
             }
         }
@@ -244,7 +245,7 @@ fn android_main(app: AndroidApp) {
                 if home.refresh(&app, &mut icons) {
                     sched.request_redraw();
                 }
-                if home.update_date(&app) {
+                if home.update_clock(&app) {
                     sched.request_redraw();
                 }
             }
