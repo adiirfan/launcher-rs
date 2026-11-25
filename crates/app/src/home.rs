@@ -7,7 +7,7 @@ use std::time::Instant;
 use android_activity::AndroidApp;
 use launcher_core::applist::AppRecord;
 use launcher_core::geometry::{ALL_APPS_SLOT, CLOCK_SP, DOCK_SLOTS, HOLO_COLS, HOLO_ROWS, HomeMetrics, Hit, Insets};
-use launcher_core::home::{AppKey, HomeLayout};
+use launcher_core::home::{AppKey, HomeLayout, Item};
 use launcher_core::pager::{Gesture, Pager};
 use launcher_draw::batch::Batch;
 use launcher_draw::{Rect, Rgba};
@@ -219,7 +219,10 @@ impl Home {
 
     fn app_at(&self, t: Target) -> Option<&AppKey> {
         match t {
-            Target::Cell { page, col, row } => self.layout.slot(page, col, row),
+            Target::Cell { page, col, row } => match self.layout.slot(page, col, row)? {
+                Item::App(a) => Some(a),
+                Item::Folder(_) => None,
+            },
             Target::Dock(i) if i != ALL_APPS_SLOT => self.layout.dock.get(i as usize)?.as_ref(),
             _ => None,
         }
@@ -312,7 +315,7 @@ impl Home {
             }
             for row in 0..m.rows {
                 for col in 0..m.cols {
-                    let Some(key) = self.layout.slot(page, col, row).cloned() else { continue };
+                    let Some(Item::App(key)) = self.layout.slot(page, col, row).cloned() else { continue };
                     let ir = m.icon_rect(col, row);
                     let ir = (ir.0 + shift, ir.1, m_icon, m_icon);
                     let pressed = self.pressed == Some(Target::Cell { page, col, row });
