@@ -47,3 +47,22 @@ pub fn stroke(batch: &mut Batch, (x0, y0): (f32, f32), (x1, y1): (f32, f32), wid
         batch.circle(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, width / 2.0, color);
     }
 }
+
+/// A notification dot at an icon's top right: accent, with a thin dark edge.
+pub fn dot(batch: &mut Batch, x: f32, y: f32, size: f32, d: f32) {
+    let (cx, cy) = (x + size - 4.0 * d, y + 4.0 * d);
+    batch.circle(cx, cy, 6.5 * d, Rgba::hex(BLACK).with_alpha(0.8));
+    batch.circle(cx, cy, 5.0 * d, Rgba::hex(accent()));
+}
+
+/// A solid triangle `w` wide and `h` tall, its middle at `cy`, pointing
+/// right (or left), built from thin upright slices.
+pub fn triangle(batch: &mut Batch, x: f32, cy: f32, w: f32, h: f32, right: bool, color: Rgba) {
+    const SLICES: usize = 10;
+    let sw = w / SLICES as f32;
+    for i in 0..SLICES {
+        let t = (i as f32 + 0.5) / SLICES as f32;
+        let sh = h * if right { 1.0 - t } else { t };
+        batch.rect(Rect::new(x + i as f32 * sw, cy - sh / 2.0, sw + 0.5, sh), color, 0.0);
+    }
+}

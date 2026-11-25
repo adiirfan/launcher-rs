@@ -1,6 +1,6 @@
 //! Folders: the round icon on Home, and the panel that opens when tapped.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use launcher_core::home::{AppKey, Folder};
 use launcher_draw::batch::Batch;
@@ -75,7 +75,7 @@ impl Panel {
     /// The panel, the folder's name (or the text being typed for a new
     /// one, with a caret), and its apps with their labels.
     #[allow(clippy::too_many_arguments)]
-    pub fn draw(&self, gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, icons: &mut Icons, folder: &Folder, labels: &HashMap<AppKey, String>, renaming: Option<&str>, pressed: Option<usize>, d: f32) {
+    pub fn draw(&self, gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, icons: &mut Icons, folder: &Folder, labels: &HashMap<AppKey, String>, dots: Option<&HashSet<String>>, renaming: Option<&str>, pressed: Option<usize>, d: f32) {
         let (x, y, w, h) = self.panel;
         batch.glow(Rect::new(x, y + 4.0 * d, w, h), Rgba::hex(BLACK).with_alpha(0.8), 2.0 * d, 16.0 * d);
         batch.rect(Rect::new(x, y, w, h), Rgba::hex(POPUP_BG), 2.0 * d);
@@ -104,6 +104,9 @@ impl Panel {
         for (i, key) in folder.apps.iter().enumerate() {
             let (ix, iy, s, _) = self.icon_rect(i);
             icons.draw(gl, r, batch, key, (ix, iy, s), pressed == Some(i), 1.0);
+            if dots.is_some_and(|set| set.contains(&key.package)) {
+                holo::dot(batch, ix, iy, s, d);
+            }
             let label = labels.get(key).map_or("", String::as_str);
             let lw = r.measure(label, label_em, label_max, Weight::Regular);
             r.text(gl, batch, label, ix + s / 2.0 - lw / 2.0, iy + s + 6.0 * d + ascent, label_em, label_max, Rgba::hex(WHITE), Weight::Regular);

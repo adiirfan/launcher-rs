@@ -20,6 +20,8 @@ use crate::folder::{self, Panel};
 use crate::fonts::Weight;
 use crate::holo::{self, BLACK, WHITE};
 use crate::icons::Icons;
+use crate::listener::{self, Media, MediaButton};
+use crate::calendar;
 use crate::menu::{self, R4, inside};
 use crate::render::Renderer;
 use crate::system;
@@ -47,6 +49,10 @@ pub enum Action {
     OpenNotifications,
     OpenAppList,
     OpenSearch,
+    /// A music button under the date.
+    Media(MediaButton),
+    /// Open the calendar at this time (ms since 1970).
+    OpenEvent(i64),
     StartShortcut(Shortcut),
     AppInfo(AppKey),
     Uninstall(AppKey),
@@ -66,6 +72,20 @@ enum Target {
     Dock(u32),
     AllApps,
     Search,
+    /// The line under the date: the event, or a music button.
+    Info(InfoHit),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum InfoHit {
+    Event,
+    Music(MediaButton),
+}
+
+/// What the line under the date shows.
+enum Info<'a> {
+    Event(&'a str),
+    Music(&'a Media),
 }
 
 /// Where a lifted item came from.
@@ -167,7 +187,13 @@ pub struct Home {
     seq: i32,
     boot: Option<i32>,
     pager: Pager,
-    metrics: Option<(HomeMetrics, (i32, i32), Insets)>,
+    metrics: Option<(HomeMetrics, (i32, i32), Insets, bool)>,
+    /// The next calendar event (start, text), when the line is on.
+    event: Option<(i64, String)>,
+    media: Option<Media>,
+    /// Apps with notifications.
+    dots: HashSet<String>,
+    listener_access: bool,
     pressed: Option<Target>,
     /// Hours, ":minutes", and the date in capitals.
     clock: (String, String, String),
@@ -233,6 +259,10 @@ impl Home {
             pressed: None,
             clock,
             density,
+            event: None,
+            media: None,
+            dots: HashSet::new(),
+            listener_access: false,
             mode: Mode::Normal,
             press: LongPress::new(LONG_PRESS, PRESS_SLOP_DP * density),
             press_at: None,
@@ -321,10 +351,112 @@ impl Home {
 
     /// Android answered the calendar question: the event line stays on
     /// only if allowed.
-    pub fn calendar_answer(&mut self, _app: &AndroidApp, granted: bool) {
+    pub fn calendar_answer(&mut self, app: &AndroidApp, granted: bool) {
         let mut s = self.settings;
         s.events = granted;
         self.set_settings(s);
+        self.update_event(app);
+    }
+
+    /// Turn the event line on (asking for the calendar first if needed) or off.
+    pub fn toggle_events(&mut self, app: &AndroidApp) {
+        let mut s = self.settings;
+        if s.events {
+            s.events = false;
+            self.set_settings(s);
+            self.event = None;
+        } else if calendar::has_permission(app) {
+            s.events = true;
+            self.set_settings(s);
+            self.update_event(app);
+        } else {
+            calendar::ask(app);
+        }
+    }
+
+    /// Re-read the next event. True if what shows changed.
+    pub fn update_event(&mut self, app: &AndroidApp) -> bool {
+        let event = if self.settings.events { calendar::next_event(app) } else { None };
+        if event != self.event {
+            log::info!("next event: {}", if event.is_some() { "one" } else { "none" });
+            self.event = event;
+            return true;
+        }
+        false
+    }
+
+    /// Back on screen: has notification access been allowed (or taken away)?
+    pub fn update_listener(&mut self, app: &AndroidApp) -> bool {
+        let access = listener::has_access(app);
+        if access && self.settings.music {
+            listener::watch_media(app);
+        }
+        let changed = access != self.listener_access;
+        self.listener_access = access;
+        changed
+    }
+
+    pub fn listener_access(&self) -> bool {
+        self.listener_access
+    }
+
+    /// Pick up dots and music Android reported. True if the screen changed.
+    pub fn take_listener(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(d) = listener::take_dots() {
+            changed |= d != self.dots;
+            self.dots = d;
+        }
+        if let Some(m) = listener::take_media() {
+            changed |= m != self.media;
+            self.media = m;
+        }
+        changed
+    }
+
+    /// Apps showing a dot, if dots are on.
+    pub fn dots(&self) -> Option<&HashSet<String>> {
+        self.settings.dots.then_some(&self.dots)
+    }
+
+    fn has_dot(&self, key: &AppKey) -> bool {
+        self.settings.dots && self.dots.contains(&key.package)
+    }
+
+    fn info(&self) -> Option<Info<'_>> {
+        if self.settings.music
+            && let Some(m) = &self.media
+        {
+            return Some(Info::Music(m));
+        }
+        match &self.event {
+            Some((_, text)) if self.settings.events => Some(Info::Event(text)),
+            _ => None,
+        }
+    }
+
+    /// The three music buttons, right to left from the screen edge: (x, size).
+    fn music_buttons(&self, m: &HomeMetrics) -> [(MediaButton, f32); 3] {
+        let d = self.density;
+        let s = 40.0 * d;
+        let right = m.screen_w - 20.0 * d;
+        [(MediaButton::Prev, right - 3.0 * s), (MediaButton::PlayPause, right - 2.0 * s), (MediaButton::Next, right - s)]
+    }
+
+    fn info_hit(&self, m: &HomeMetrics, x: f32, y: f32) -> Option<InfoHit> {
+        let d = self.density;
+        let info = self.info()?;
+        if y < m.date_baseline + 6.0 * d || y >= m.grid_top {
+            return None;
+        }
+        Some(match info {
+            Info::Event(_) => InfoHit::Event,
+            Info::Music(_) => {
+                let s = 40.0 * d;
+                let b = self.music_buttons(m).into_iter().find(|&(_, bx)| x >= bx && x < bx + s).map_or(MediaButton::Open, |(b, _)| b);
+                InfoHit::Music(b)
+            }
+        })
     }
 
     /// Every app, hidden ones included, A to Z.
@@ -535,14 +667,14 @@ impl Home {
     }
 
     fn panel(&self, apps: usize) -> Panel {
-        let (m, _, insets) = self.metrics.expect("metrics before touches");
+        let (m, _, insets, _) = self.metrics.expect("metrics before touches");
         let d = self.density;
         let top = (m.grid_top - 40.0 * d).max(insets.top + 8.0 * d);
         Panel::new(m.screen_w, top, m.icon, apps, d)
     }
 
     fn top_bar(&self) -> R4 {
-        let (m, _, insets) = self.metrics.expect("metrics before touches");
+        let (m, _, insets, _) = self.metrics.expect("metrics before touches");
         menu::top_bar(m.screen_w, insets, self.density)
     }
 
@@ -559,13 +691,13 @@ impl Home {
         if lift.shortcuts.is_empty() {
             return None;
         }
-        let (m, _, insets) = self.metrics?;
+        let (m, _, insets, _) = self.metrics?;
         let (x, y, s) = lift.origin;
         Some(menu::popup_rect((x, y, s, s), lift.shortcuts.len(), 240.0, (m.screen_w, m.screen_h), insets, self.density))
     }
 
     fn space_popup(&self, x: f32, y: f32) -> R4 {
-        let (m, _, insets) = self.metrics.expect("metrics before touches");
+        let (m, _, insets, _) = self.metrics.expect("metrics before touches");
         menu::popup_rect((x, y, 0.0, 0.0), 2, 200.0, (m.screen_w, m.screen_h), insets, self.density)
     }
 
@@ -659,12 +791,13 @@ impl Home {
     }
 
     fn metrics_for(&mut self, screen: (i32, i32), insets: Insets) -> HomeMetrics {
+        let line = self.info().is_some();
         match self.metrics {
-            Some((m, s, i)) if s == screen && i == insets => m,
+            Some((m, s, i, l)) if s == screen && i == insets && l == line => m,
             _ => {
-                let m = HomeMetrics::new(screen.0 as f32, screen.1 as f32, self.density, insets, self.layout.cols, self.layout.rows, false);
+                let m = HomeMetrics::new(screen.0 as f32, screen.1 as f32, self.density, insets, self.layout.cols, self.layout.rows, line);
                 log::info!("home metrics: icon {:.0}px cell {:.0}x{:.0} insets {:?}", m.icon, m.cell_w, m.cell_h, insets);
-                self.metrics = Some((m, screen, insets));
+                self.metrics = Some((m, screen, insets, line));
                 self.pager.set_width(screen.0 as f32);
                 m
             }
@@ -673,6 +806,9 @@ impl Home {
 
     fn target_at(&self, x: f32, y: f32) -> Option<Target> {
         let (m, ..) = self.metrics?;
+        if let Some(hit) = self.info_hit(&m, x, y) {
+            return Some(Target::Info(hit));
+        }
         Some(match m.hit(x, y)? {
             Hit::Cell { col, row } => Target::Cell { page: self.pager.page(), col, row },
             Hit::Dock(i) => Target::Dock(i),
@@ -707,9 +843,9 @@ impl Home {
             TouchKind::Down => {
                 self.pager.touch_down(t.x, t.y, t.t);
                 let target = self.target_at(t.x, t.y);
-                self.pressed = target.filter(|&tg| matches!(tg, Target::Search | Target::AllApps) || self.item_at(tg).is_some());
+                self.pressed = target.filter(|&tg| matches!(tg, Target::Search | Target::AllApps | Target::Info(_)) || self.item_at(tg).is_some());
                 let at = match target {
-                    Some(Target::Search | Target::AllApps) => None,
+                    Some(Target::Search | Target::AllApps | Target::Info(_)) => None,
                     Some(tg @ Target::Cell { page, col, row }) if self.item_at(tg).is_some() => Some(PressAt::Item(Pos::Cell { page, col, row })),
                     Some(tg @ Target::Dock(i)) if self.item_at(tg).is_some() => Some(PressAt::Item(Pos::Dock(i))),
                     _ => Some(PressAt::Space),
@@ -738,6 +874,11 @@ impl Home {
                     Gesture::Tap { x, y } => match (pressed, self.target_at(x, y)) {
                         (Some(Target::Search), Some(Target::Search)) => Action::OpenSearch,
                         (Some(Target::AllApps), Some(Target::AllApps)) => Action::OpenAppList,
+                        (Some(Target::Info(a)), Some(Target::Info(b))) if a == b => match (a, &self.event) {
+                            (InfoHit::Music(button), _) => Action::Media(button),
+                            (InfoHit::Event, Some((begin, _))) => Action::OpenEvent(*begin),
+                            _ => Action::None,
+                        },
                         (Some(p), Some(now)) if p == now => match (p, self.item_at(p)) {
                             (_, Some(Item::App(key))) => Action::Launch(key),
                             (Target::Cell { page, col, row }, Some(Item::Folder(_))) => {
@@ -975,6 +1116,8 @@ impl Home {
         let dw = r.measure_spaced(&date, em, spacing, Weight::Regular).min(m.screen_w - 32.0 * d);
         self.shadowed(gl, r, batch, &date, (m.screen_w - dw) / 2.0, m.date_baseline, em, spacing, m.screen_w - 32.0 * d, Rgba::hex(holo::DATE), Weight::Regular);
 
+        self.draw_info(gl, r, batch, &m);
+
         // Pages: the current one, plus its neighbour while swiping.
         let offset = self.pager.offset(now);
         let label_em = LABEL_SP * d;
@@ -994,10 +1137,16 @@ impl Home {
                     let label = match &item {
                         Item::App(key) => {
                             icons.draw(gl, r, batch, key, (ir.0, ir.1, m_icon), pressed, 1.0);
+                            if self.has_dot(key) {
+                                holo::dot(batch, ir.0, ir.1, m_icon, d);
+                            }
                             self.labels.get(key).cloned().unwrap_or_default()
                         }
                         Item::Folder(f) => {
                             folder::draw_icon(gl, r, batch, icons, f, (ir.0, ir.1, m_icon), pressed, d);
+                            if f.apps.iter().any(|k| self.has_dot(k)) {
+                                holo::dot(batch, ir.0, ir.1, m_icon, d);
+                            }
                             f.name.clone()
                         }
                     };
@@ -1031,6 +1180,9 @@ impl Home {
             let pressed = self.pressed == Some(Target::Dock(i));
             let ir = m.dock_icon_rect(i);
             icons.draw(gl, r, batch, &key, (ir.0, ir.1, ir.2), pressed, 1.0);
+            if self.has_dot(&key) {
+                holo::dot(batch, ir.0, ir.1, ir.2, d);
+            }
         }
         let (ax, ay, aw, _) = m.all_apps_rect();
         let (cx, cy, rad) = (ax + aw / 2.0, ay + aw / 2.0, aw / 2.0);
@@ -1058,6 +1210,52 @@ impl Home {
 
         self.draw_overlays(gl, r, batch, icons, &m, offset);
         self.pager.animating(now) || self.pager.dragging_pages()
+    }
+
+    /// The line under the date: music controls, or the next event.
+    fn draw_info(&self, gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, m: &HomeMetrics) {
+        let d = self.density;
+        let quiet = Rgba::hex(holo::QUIET);
+        let em = 14.0 * d;
+        match self.info() {
+            None => {}
+            Some(Info::Event(text)) => {
+                let max = m.screen_w - 48.0 * d;
+                let w = r.measure(text, em, max, Weight::Light);
+                self.shadowed(gl, r, batch, text, (m.screen_w - w) / 2.0, m.info_baseline, em, 0.0, max, quiet, Weight::Light);
+            }
+            Some(Info::Music(media)) => {
+                let text = if media.artist.is_empty() { media.title.clone() } else { format!("{} \u{00B7} {}", media.title, media.artist) };
+                let buttons = self.music_buttons(m);
+                let left = 24.0 * d;
+                let max = buttons[0].1 - left - 8.0 * d;
+                self.shadowed(gl, r, batch, &text, left, m.info_baseline, em, 0.0, max, quiet, Weight::Light);
+                let s = 40.0 * d;
+                let cy = m.info_baseline - 5.0 * d;
+                let white = Rgba::hex(WHITE);
+                for (b, x) in buttons {
+                    let pressed = self.pressed == Some(Target::Info(InfoHit::Music(b)));
+                    let c = if pressed { Rgba::hex(holo::accent()) } else { white };
+                    let cx = x + s / 2.0;
+                    let (w, h) = (10.0 * d, 12.0 * d);
+                    match b {
+                        MediaButton::Prev => {
+                            batch.rect(Rect::new(cx - w / 2.0 - 2.0 * d, cy - h / 2.0, 2.0 * d, h), c, 0.0);
+                            holo::triangle(batch, cx - w / 2.0, cy, w, h, false, c);
+                        }
+                        MediaButton::Next => {
+                            holo::triangle(batch, cx - w / 2.0, cy, w, h, true, c);
+                            batch.rect(Rect::new(cx + w / 2.0, cy - h / 2.0, 2.0 * d, h), c, 0.0);
+                        }
+                        _ if media.playing => {
+                            batch.rect(Rect::new(cx - 5.0 * d, cy - h / 2.0, 3.5 * d, h), c, 0.0);
+                            batch.rect(Rect::new(cx + 1.5 * d, cy - h / 2.0, 3.5 * d, h), c, 0.0);
+                        }
+                        _ => holo::triangle(batch, cx - w / 2.0 + 1.0 * d, cy, w, h, true, c),
+                    }
+                }
+            }
+        }
     }
 
     /// An item picked up: an accent ring and glow around it.
@@ -1135,7 +1333,7 @@ impl Home {
                     Some(FolderHit::App(i)) => Some(i),
                     _ => None,
                 };
-                self.panel(folder.apps.len()).draw(gl, r, batch, icons, folder, &self.labels, f.renaming.as_deref(), pressed, d);
+                self.panel(folder.apps.len()).draw(gl, r, batch, icons, folder, &self.labels, self.dots(), f.renaming.as_deref(), pressed, d);
             }
         }
     }

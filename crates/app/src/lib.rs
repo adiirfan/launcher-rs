@@ -137,7 +137,7 @@ fn android_main(app: AndroidApp) {
         let speed = style.animations.factor();
         for t in input.touches {
             if settings.is_open() {
-                settings.touch(t, &mut home);
+                settings.touch(t, &app, &mut home);
                 continue;
             }
             if drawer.is_open() {
@@ -218,6 +218,12 @@ fn android_main(app: AndroidApp) {
             if home.update_clock(&app) {
                 sched.request_redraw();
             }
+            if m % 5 == 0 && visible && home.update_event(&app) {
+                sched.request_redraw();
+            }
+        }
+        if home.take_listener() {
+            sched.request_redraw();
         }
 
         let now = Instant::now();
@@ -236,7 +242,7 @@ fn android_main(app: AndroidApp) {
                 if !drawer.covers_home(now) && !settings.covers_home(now) {
                     moving |= home.draw(g.gl(), r, &mut batch, &mut icons, screen, ins, now);
                 }
-                moving |= drawer.draw(g.gl(), r, &mut batch, &mut icons, home.apps(), screen, ins, now);
+                moving |= drawer.draw(g.gl(), r, &mut batch, &mut icons, home.apps(), home.dots(), screen, ins, now);
                 moving |= settings.draw(g.gl(), r, &mut batch, &mut icons, &home, screen, ins, now);
                 r.draw(g.gl(), &batch, screen);
                 if let Err(e) = g.swap() {
@@ -277,6 +283,9 @@ fn android_main(app: AndroidApp) {
             if needs_refresh {
                 needs_refresh = false;
                 if home.refresh(&app, &mut icons) {
+                    sched.request_redraw();
+                }
+                if home.update_listener(&app) | home.update_event(&app) {
                     sched.request_redraw();
                 }
                 if home.update_clock(&app) {
@@ -420,6 +429,11 @@ fn home_action(app: &AndroidApp, drawer: &mut Drawer, settings: &mut SettingsScr
             keyboard::clear_text(app);
             drawer.open(now, true);
             keyboard::show(app, true);
+        }
+        Action::Media(b) => listener::media_button(app, b),
+        Action::OpenEvent(begin) => {
+            let ok = system::start(app, "android.intent.action.VIEW", Some(&format!("content://com.android.calendar/time/{begin}")));
+            log::info!("open calendar -> {ok}");
         }
         Action::StartShortcut(s) => {
             let ok = apps::start_shortcut(app, &s);
