@@ -3,6 +3,7 @@
 
 use std::time::{Duration, Instant};
 
+use android_activity::AndroidApp;
 use launcher_core::geometry::Insets;
 use launcher_core::scroll::{ListGesture, Scroller};
 use launcher_core::settings::{Accent, Settings};
@@ -13,6 +14,7 @@ use crate::fonts::Weight;
 use crate::holo::{self, BLACK, DIVIDER, ROW_LINE, WHITE};
 use crate::home::{Home, Touch, TouchKind};
 use crate::icons::Icons;
+use crate::listener;
 use crate::menu::{self, R4, inside};
 use crate::render::Renderer;
 
@@ -30,6 +32,7 @@ enum RowId {
     Icons,
     Labels,
     Clock,
+    Music,
     AddNew,
     Search,
     Hidden,
@@ -41,20 +44,26 @@ enum RowId {
 
 const SECTIONS: [(&str, &[RowId]); 5] = [
     ("LOOK", &[RowId::Theme, RowId::Accent, RowId::Icons, RowId::Labels]),
-    ("HOME SCREEN", &[RowId::Clock, RowId::AddNew, RowId::Search]),
+    ("HOME SCREEN", &[RowId::Clock, RowId::Music, RowId::AddNew, RowId::Search]),
     ("APPS", &[RowId::Hidden, RowId::Dots]),
     ("SPEED", &[RowId::Animations, RowId::Glow]),
     ("PRIVACY", &[RowId::Internet]),
 ];
 
 /// A row's title, its line underneath, and its tick box (if it has one).
-fn row_text(id: RowId, s: &Settings) -> (&'static str, String, Option<bool>) {
+fn row_text(id: RowId, s: &Settings, access: bool) -> (&'static str, String, Option<bool>) {
+    const NEEDS_ACCESS: &str = "Needs notification access. Tap to allow.";
     match id {
         RowId::Theme => ("Theme", "Holo (the Android 4 look)".into(), None),
         RowId::Accent => ("Accent colour", s.accent.name().into(), None),
         RowId::Icons => ("App icons", "Each app shows its own icon".into(), None),
         RowId::Labels => ("Icon labels", "Show names under icons on Home".into(), Some(s.labels)),
-        RowId::Clock => ("Clock widget", "Time, date and your next event".into(), None),
+        RowId::Clock => ("Clock widget", "Time, date and your next event".into(), Some(s.events)),
+        RowId::Music => (
+            "Music controls",
+            if s.music && !access { NEEDS_ACCESS } else { "Play, pause and skip from Home" }.into(),
+            Some(s.music),
+        ),
         RowId::AddNew => (
             "Add new apps to Home",
             if s.add_new_apps { "New installs also go on Home" } else { "New installs only go in the app list" }.into(),
@@ -62,7 +71,11 @@ fn row_text(id: RowId, s: &Settings) -> (&'static str, String, Option<bool>) {
         ),
         RowId::Search => ("Search bar", "Apps, contacts and settings on this phone".into(), None),
         RowId::Hidden => ("Hidden apps", "Choose apps to keep out of the list".into(), None),
-        RowId::Dots => ("Notification dots", "Show a dot when an app has something new".into(), Some(s.dots)),
+        RowId::Dots => (
+            "Notification dots",
+            if s.dots && !access { NEEDS_ACCESS } else { "Show a dot when an app has something new" }.into(),
+            Some(s.dots),
+        ),
         RowId::Animations => ("Animations", s.animations.name().into(), None),
         RowId::Glow => ("Scrolling glow", "A glow at the end of a list".into(), Some(s.glow)),
         RowId::Internet => ("Internet access", "Not requested. The launcher works fully offline".into(), None),
@@ -109,7 +122,7 @@ pub struct SettingsScreen {
     picker: bool,
     blocks: Vec<Block>,
     /// Settings and width the blocks were laid out for.
-    laid_out: Option<(Settings, f32)>,
+    laid_out: Option<(Settings, f32, bool)>,
     screen: (f32, f32),
     insets: Insets,
     density: f32,
@@ -248,7 +261,7 @@ impl SettingsScreen {
     }
 
     /// True when the screen needs drawing.
-    pub fn touch(&mut self, t: Touch, home: &mut Home) -> bool {
+    pub fn touch(&mut self, t: Touch, app: &AndroidApp, home: &mut Home) -> bool {
         if !self.is_open() || self.screen.0 == 0.0 {
             return false;
         }
@@ -281,14 +294,14 @@ impl SettingsScreen {
                 };
                 let now_hit = self.hit(t.x, t.y, t.t, apps);
                 if tap && pressed == Some(now_hit) {
-                    self.act(now_hit, home, t.t);
+                    self.act(now_hit, app, home, t.t);
                 }
             }
         }
         true
     }
 
-    fn act(&mut self, hit: Hit, home: &mut Home, now: Instant) {
+    fn act(&mut self, hit: Hit, app: &AndroidApp, home: &mut Home, now: Instant) {
         let mut s = home.settings();
         match hit {
             Hit::Back => self.back(now, s.animations.factor()),
@@ -307,7 +320,19 @@ impl SettingsScreen {
                 RowId::Accent => self.picker = true,
                 RowId::Labels => s.labels = !s.labels,
                 RowId::AddNew => s.add_new_apps = !s.add_new_apps,
-                RowId::Dots => s.dots = !s.dots,
+                RowId::Dots | RowId::Music => {
+                    let on = if id == RowId::Dots { &mut s.dots } else { &mut s.music };
+                    let access = home.listener_access();
+                    // On but not allowed yet: the row says "Tap to allow", so a
+                    // tap shows Android's page for it instead of switching off.
+                    if !(*on && !access) {
+                        *on = !*on;
+                    }
+                    if *on && !access {
+                        listener::open_access_settings(app);
+                    }
+                }
+                RowId::Clock => home.toggle_events(app),
                 RowId::Glow => s.glow = !s.glow,
                 RowId::Animations => s.animations = s.animations.next(),
                 RowId::Hidden => {
@@ -315,10 +340,11 @@ impl SettingsScreen {
                     self.scroller.reset();
                 }
                 // These rows only say what the launcher does.
-                RowId::Theme | RowId::Icons | RowId::Clock | RowId::Search | RowId::Internet => {}
+                RowId::Theme | RowId::Icons | RowId::Search | RowId::Internet => {}
             },
         }
-        if s != home.settings() {
+        // toggle_events may have changed the settings itself.
+        if hit != Hit::Row(RowId::Clock) && s != home.settings() {
             log::info!("settings changed");
             home.set_settings(s);
         }
@@ -342,8 +368,8 @@ impl SettingsScreen {
         lines
     }
 
-    fn lay_out(&mut self, r: &mut Renderer, s: &Settings) {
-        if self.laid_out == Some((*s, self.screen.0)) {
+    fn lay_out(&mut self, r: &mut Renderer, s: &Settings, access: bool) {
+        if self.laid_out == Some((*s, self.screen.0, access)) {
             return;
         }
         let d = self.density;
@@ -353,7 +379,7 @@ impl SettingsScreen {
             blocks.push(Block::Section { title, y });
             y += 41.0 * d;
             for &id in rows {
-                let (_, sub, tick) = row_text(id, s);
+                let (_, sub, tick) = row_text(id, s, access);
                 let max = self.screen.0 - 40.0 * d - if tick.is_some() { 60.0 * d } else { 0.0 };
                 let sub = Self::wrap(r, &sub, 14.0 * d, max);
                 let h = (51.0 + 19.0 * sub.len() as f32).max(72.0) * d;
@@ -362,7 +388,7 @@ impl SettingsScreen {
             }
         }
         self.blocks = blocks;
-        self.laid_out = Some((*s, self.screen.0));
+        self.laid_out = Some((*s, self.screen.0, access));
     }
 
     fn content_height(&self, apps: usize) -> f32 {
@@ -408,7 +434,8 @@ impl SettingsScreen {
         self.insets = insets;
         let d = self.density;
         let settings = home.settings();
-        self.lay_out(r, &settings);
+        let access = home.listener_access();
+        self.lay_out(r, &settings, access);
         let apps = home.all_apps();
         let visible = self.list_bottom() - self.list_top();
         self.scroller.set_bounds(self.content_height(apps.len()) - visible);
@@ -439,7 +466,7 @@ impl SettingsScreen {
                             if y > h || y + rh < top {
                                 continue;
                             }
-                            let (title, _, tick) = row_text(*id, &settings);
+                            let (title, _, tick) = row_text(*id, &settings, access);
                             if self.pressed == Some(Hit::Row(*id)) {
                                 batch.rect(Rect::new(dx, y, w, *rh), accent.with_alpha(0.25), 0.0);
                             }

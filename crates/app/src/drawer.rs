@@ -444,7 +444,7 @@ impl Drawer {
 
     /// Build the list's part of the frame. Returns true while anything moves.
     #[allow(clippy::too_many_arguments)]
-    pub fn draw(&mut self, gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, icons: &mut Icons, apps: (&[AppRecord], u64), screen: (i32, i32), insets: Insets, now: Instant) -> bool {
+    pub fn draw(&mut self, gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, icons: &mut Icons, apps: (&[AppRecord], u64), dots: Option<&HashSet<String>>, screen: (i32, i32), insets: Insets, now: Instant) -> bool {
         let p = self.progress(now);
         if let Some(s) = self.slide
             && now >= s.start + s.dur
@@ -485,6 +485,9 @@ impl Drawer {
             let iy = iy + lift;
             let pressed = self.pressed == Some(Target::App(slot));
             icons.draw(gl, r, batch, &rec.key, (ix, iy, is), pressed, fade);
+            if dots.is_some_and(|d| d.contains(&rec.key.package)) {
+                holo::dot(batch, ix, iy, is, d);
+            }
             if !rec.label.is_empty() {
                 let lw = r.measure(&rec.label, label_em, label_max, Weight::Regular);
                 let baseline = iy + is + m.label_gap + label_ascent;

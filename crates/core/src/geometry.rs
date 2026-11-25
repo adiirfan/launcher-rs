@@ -39,6 +39,8 @@ pub struct HomeMetrics {
     pub label_gap: f32,
     pub clock_baseline: f32,
     pub date_baseline: f32,
+    /// The line under the date (next event or music).
+    pub info_baseline: f32,
     /// The thin page bar: x, y, w, h.
     pub page_bar: (f32, f32, f32, f32),
     pub dock_top: f32,
@@ -50,7 +52,7 @@ pub struct HomeMetrics {
 }
 
 impl HomeMetrics {
-    pub fn new(screen_w: f32, screen_h: f32, density: f32, insets: Insets, cols: u32, rows: u32) -> HomeMetrics {
+    pub fn new(screen_w: f32, screen_h: f32, density: f32, insets: Insets, cols: u32, rows: u32, info_line: bool) -> HomeMetrics {
         let d = density;
         let inner_w = screen_w - insets.left - insets.right;
 
@@ -62,7 +64,9 @@ impl HomeMetrics {
 
         let clock_baseline = insets.top + 56.0 * d + CLOCK_SP * d * 0.75;
         let date_baseline = clock_baseline + 26.0 * d;
-        let grid_top = insets.top + 160.0 * d;
+        let info_baseline = date_baseline + 22.0 * d;
+        // One more line under the date (next event or music) pushes the grid down.
+        let grid_top = insets.top + 160.0 * d + if info_line { 24.0 * d } else { 0.0 };
         let grid_bottom = page_bar.1 - 8.0 * d;
         let cell_w = (inner_w - 16.0 * d) / cols as f32;
         let cell_h = ((grid_bottom - grid_top) / rows as f32).max(0.0);
@@ -83,6 +87,7 @@ impl HomeMetrics {
             label_gap: 6.0 * d,
             clock_baseline,
             date_baseline,
+            info_baseline,
             page_bar,
             dock_top,
             dock_h,
@@ -144,7 +149,7 @@ mod tests {
 
     fn m() -> HomeMetrics {
         let ins = Insets { top: 72.0, bottom: 144.0, left: 0.0, right: 0.0 };
-        HomeMetrics::new(1080.0, 2160.0, 3.0, ins, HOLO_COLS, HOLO_ROWS)
+        HomeMetrics::new(1080.0, 2160.0, 3.0, ins, HOLO_COLS, HOLO_ROWS, false)
     }
 
     fn centre(r: (f32, f32, f32, f32)) -> (f32, f32) {
@@ -167,9 +172,22 @@ mod tests {
     }
 
     #[test]
+    fn info_line_moves_the_grid_down_and_it_still_fits() {
+        let ins = Insets { top: 72.0, bottom: 144.0, left: 0.0, right: 0.0 };
+        let plain = m();
+        let with = HomeMetrics::new(1080.0, 2160.0, 3.0, ins, HOLO_COLS, HOLO_ROWS, true);
+        assert!((with.grid_top - plain.grid_top - 24.0 * 3.0).abs() < 0.01);
+        assert!((with.info_baseline - with.date_baseline - 22.0 * 3.0).abs() < 0.01);
+        assert!(with.info_baseline < with.grid_top);
+        assert!(with.grid_top + with.rows as f32 * with.cell_h <= with.page_bar.1 + 0.01);
+        assert!(with.icon >= 40.0 * 3.0);
+        assert!(with.icon + with.label_gap + 18.0 * 3.0 <= with.cell_h + 0.01);
+    }
+
+    #[test]
     fn tall_screen_gets_full_size_icons() {
         let ins = Insets { top: 72.0, bottom: 144.0, left: 0.0, right: 0.0 };
-        let m = HomeMetrics::new(1080.0, 2400.0, 2.625, ins, 4, 4);
+        let m = HomeMetrics::new(1080.0, 2400.0, 2.625, ins, 4, 4, false);
         assert_eq!(m.icon, 56.0 * 2.625);
     }
 
