@@ -79,6 +79,15 @@ public class MainActivity extends NativeActivity {
         });
     }
 
+    /** Android wants memory back; Rust drops what it can rebuild. */
+    @Override public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        onTrim(level);
+        // Android's icon pictures from the app list wait for a Java clean-up
+        // before their memory is returned; while hidden, do it now.
+        if (level >= TRIM_MEMORY_UI_HIDDEN) System.gc();
+    }
+
     /** Home pressed while we're already Home. */
     @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); onHome(); }
 
@@ -268,6 +277,7 @@ public class MainActivity extends NativeActivity {
     private static native void onText(String text, int selStart, int selEnd, int compStart, int compEnd);
     private static native void onAction();
     private static native void onHome();
+    private static native void onTrim(int level);
     private static native void onPermission(int code, boolean granted);
     private static native void onMedia(String title, String artist, int state);
 

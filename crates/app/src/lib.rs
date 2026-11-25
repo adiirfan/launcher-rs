@@ -212,6 +212,19 @@ fn android_main(app: AndroidApp) {
             sched.request_redraw();
         }
 
+        // Android wants memory back while another app is in front (20 is
+        // "UI hidden"). Home's icons stay, so pressing Home is still instant.
+        if let Some(level) = keyboard::take_trim() {
+            log::info!("trim memory level {level}, visible {visible}");
+            if level >= 20 && !visible {
+                drawer.trim();
+                if let Some(r) = renderer.as_mut() {
+                    r.trim_glyphs();
+                }
+                purge_freed_memory();
+            }
+        }
+
         let m = current_minute();
         if m != minute {
             minute = m;

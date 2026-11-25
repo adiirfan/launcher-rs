@@ -228,6 +228,13 @@ impl Renderer {
     }
 
     /// True when something was skipped this frame and another frame is needed.
+    /// Forget every rasterised glyph; they're drawn again when next used.
+    pub fn trim_glyphs(&mut self) {
+        self.glyphs.packer.reset();
+        self.glyphs.full = false;
+        self.glyph_keys = HashMap::new();
+    }
+
     pub fn wants_redraw(&self) -> bool {
         self.redraw
     }

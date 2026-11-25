@@ -255,6 +255,18 @@ impl Drawer {
         self.recheck = true;
     }
 
+    /// Android wants memory: forget search results, contacts and the list of
+    /// settings pages. All of it is looked up again when next needed.
+    pub fn trim(&mut self) {
+        self.results = Vec::new();
+        self.results_gen = None;
+        self.contacts = Vec::new();
+        self.contacts_for = None;
+        self.available = None;
+        self.settings = Vec::new();
+        self.metrics = None;
+    }
+
     /// Enter on the keyboard: the best app match, else the best settings page.
     pub fn first_match(&self, apps: &[AppRecord]) -> DrawerAction {
         if !self.has_query() {
