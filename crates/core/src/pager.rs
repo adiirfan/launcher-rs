@@ -183,6 +183,14 @@ impl Pager {
         }
     }
 
+    /// Slide to `page` (clamped), dropping any drag in progress.
+    pub fn snap_to(&mut self, page: usize, t: Instant) {
+        let from = self.offset(t);
+        self.drag = None;
+        self.page = page.min(self.pages - 1);
+        self.snap = Some(Snap { from, start: t });
+    }
+
     pub fn touch_cancel(&mut self, t: Instant) {
         if let Some(d) = self.drag.take() {
             if d.lock == Lock::Horizontal {
@@ -280,6 +288,22 @@ mod tests {
         p.touch_move(720.0, 500.0, ms(t0, 40));
         p.touch_up(720.0, 500.0, ms(t0, 48));
         assert_eq!(p.page(), 1);
+    }
+
+    #[test]
+    fn snap_to_slides_to_a_page() {
+        let t0 = Instant::now();
+        let mut p = Pager::new(3, W);
+        p.touch_down(800.0, 500.0, t0);
+        p.touch_move(100.0, 500.0, ms(t0, 100));
+        p.touch_up(100.0, 500.0, ms(t0, 400));
+        assert_eq!(p.page(), 1);
+        p.snap_to(0, ms(t0, 1000));
+        assert_eq!(p.page(), 0);
+        assert!(p.animating(ms(t0, 1100)));
+        assert_eq!(p.offset(ms(t0, 1300)), 0.0);
+        p.snap_to(9, ms(t0, 2000));
+        assert_eq!(p.page(), 2);
     }
 
     #[test]

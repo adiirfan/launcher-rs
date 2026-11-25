@@ -253,7 +253,7 @@ impl Renderer {
 
     /// Put a square icon in a slot (reusing the slot drawn longest ago when
     /// all are taken); returns its uv. `None` when every slot is already
-    /// drawn this frame; a redraw is then requested.
+    /// drawn this frame.
     pub fn icon(&mut self, gl: &glow::Context, key: &str, rgba: &[u8], w: u32, h: u32) -> Option<[f32; 4]> {
         if w != h || rgba.len() != (w * h * 4) as usize {
             log::warn!("icon {key}: not a square RGBA image ({w}x{h})");
@@ -268,8 +268,9 @@ impl Renderer {
         if let Some(at) = slots.get(key) {
             return Some(self.slot_uv(at, w));
         }
+        // Every slot is already drawn this frame. Another frame wouldn't
+        // help, so draw a placeholder rather than asking for one.
         let Some((x, y)) = slots.insert(key) else {
-            self.redraw = true;
             return None;
         };
         unsafe {

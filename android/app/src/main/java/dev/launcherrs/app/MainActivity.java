@@ -19,6 +19,9 @@ import android.view.inputmethod.*;
 public class MainActivity extends NativeActivity {
     static { System.loadLibrary("launcher"); } // so Java finds onText/onAction
     private View input;
+    /** The search text. Kept here so it survives the keyboard reconnecting
+     *  (after a dialog or the notification shade takes focus). */
+    private final Editable text = Editable.Factory.getInstance().newEditable("");
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -28,7 +31,7 @@ public class MainActivity extends NativeActivity {
             @Override public InputConnection onCreateInputConnection(EditorInfo info) {
                 info.inputType = InputType.TYPE_CLASS_TEXT;
                 info.imeOptions = EditorInfo.IME_ACTION_SEARCH | EditorInfo.IME_FLAG_NO_FULLSCREEN;
-                return new Bridge(this);
+                return new Bridge(this, text);
             }
         };
         input.setFocusableInTouchMode(true);
@@ -44,9 +47,12 @@ public class MainActivity extends NativeActivity {
         });
     }
 
-    /** Empty the search text: a fresh input connection starts with no text. */
+    /** Empty the search text, and tell the keyboard to start over. */
     public void clearText() {
         runOnUiThread(() -> {
+            BaseInputConnection.removeComposingSpans(text);
+            text.clear();
+            Selection.setSelection(text, 0);
             ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).restartInput(input);
             onText("", 0, 0, -1, -1);
         });
@@ -69,7 +75,9 @@ public class MainActivity extends NativeActivity {
     private static native void onPermission(boolean granted);
 
     private static final class Bridge extends BaseInputConnection {
-        Bridge(View v) { super(v, true); }
+        private final Editable text;
+        Bridge(View v, Editable text) { super(v, true); this.text = text; }
+        @Override public Editable getEditable() { return text; }
         private boolean push(boolean r) {
             Editable e = getEditable();
             onText(e.toString(), Selection.getSelectionStart(e), Selection.getSelectionEnd(e),

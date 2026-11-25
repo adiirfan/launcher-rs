@@ -13,6 +13,7 @@ use launcher_draw::{Rect, Rgba};
 
 use crate::apps;
 use crate::cache::Store;
+use crate::icons::Icons;
 use crate::render::Renderer;
 use crate::system;
 
@@ -56,6 +57,10 @@ const DATE_DP: f32 = 28.0;
 pub struct Home {
     store: Store,
     layout: HomeLayout,
+    /// Every launchable app, A to Z.
+    records: Vec<AppRecord>,
+    /// Bumped whenever `records` changes.
+    records_gen: u64,
     labels: HashMap<AppKey, String>,
     seq: i32,
     boot: Option<i32>,
@@ -63,25 +68,14 @@ pub struct Home {
     metrics: Option<(HomeMetrics, (i32, i32), Insets)>,
     pressed: Option<Target>,
     date: String,
-    /// Icons Android couldn't draw; shown as a plain circle, not retried.
-    failed_icons: HashSet<AppKey>,
-    /// Icons not on disk yet: fetched from Android after the frame.
-    missing_icons: Vec<AppKey>,
-    /// Icons whose app changed: dropped from the atlas next frame.
-    stale_icons: Vec<AppKey>,
     density: f32,
-}
-
-fn atlas_key(key: &AppKey) -> String {
-    format!("{}/{}", key.package, key.activity)
 }
 
 impl Home {
     /// Everything from the files on disk. Only a first install (no saved
     /// app list) asks Android here, before the first frame.
-    pub fn load(app: &AndroidApp) -> Home {
+    pub fn load(app: &AndroidApp, store: Store) -> Home {
         let t0 = Instant::now();
-        let store = Store::open(app);
         let density = app.config().density().unwrap_or(160) as f32 / 160.0;
         let (records, seq, boot) = match store.load_apps() {
             Some((records, seq)) => (records, seq, store.load_boot()),
@@ -107,13 +101,15 @@ impl Home {
             store.save_layout(&layout);
             log::info!("layout: removed missing apps");
         }
-        let labels = records.into_iter().map(|r| (r.key, r.label)).collect();
+        let labels = records.iter().map(|r| (r.key.clone(), r.label.clone())).collect();
         let pager = Pager::new(layout.pages.len(), 1.0);
         let date = system::date_text(app).unwrap_or_default();
         log::info!("home loaded in {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
         Home {
             store,
             layout,
+            records,
+            records_gen: 0,
             labels,
             seq,
             boot,
@@ -121,16 +117,13 @@ impl Home {
             metrics: None,
             pressed: None,
             date,
-            failed_icons: HashSet::new(),
-            missing_icons: Vec::new(),
-            stale_icons: Vec::new(),
             density,
         }
     }
 
     /// Ask Android what changed since the saved list. Returns true when
     /// something on screen may have changed.
-    pub fn refresh(&mut self, app: &AndroidApp) -> bool {
+    pub fn refresh(&mut self, app: &AndroidApp, icons: &mut Icons) -> bool {
         let t0 = Instant::now();
         let boot = apps::boot_count(app);
         let (seq, changed) = if self.boot == Some(boot) {
@@ -150,9 +143,7 @@ impl Home {
         let changed: HashSet<&str> = changed.iter().map(String::as_str).collect();
         for key in self.labels.keys().chain(records.iter().map(|r| &r.key)) {
             if changed.contains(key.package.as_str()) {
-                self.store.forget_icon(key);
-                self.failed_icons.remove(key);
-                self.stale_icons.push(key.clone());
+                icons.changed(key);
             }
         }
         let installed: HashSet<AppKey> = records.iter().map(|r| r.key.clone()).collect();
@@ -163,7 +154,9 @@ impl Home {
         }
         self.store.save_apps(&records, seq);
         self.store.save_boot(boot);
-        self.labels = records.into_iter().map(|AppRecord { key, label }| (key, label)).collect();
+        self.labels = records.iter().map(|AppRecord { key, label }| (key.clone(), label.clone())).collect();
+        self.records = records;
+        self.records_gen += 1;
         self.seq = seq;
         self.boot = Some(boot);
         log::info!("refresh: {} changed package(s), {:.0} ms", changed.len(), t0.elapsed().as_secs_f64() * 1e3);
@@ -181,20 +174,15 @@ impl Home {
         }
     }
 
-    /// Fetch icons that weren't on disk, save them, and say whether to redraw.
-    pub fn load_missing_icons(&mut self, app: &AndroidApp) -> bool {
-        let Some((m, ..)) = self.metrics else { return false };
-        let size = m.icon.round() as i32;
-        let missing = std::mem::take(&mut self.missing_icons);
-        for key in &missing {
-            match apps::load_icon_rgba(app, key, size) {
-                Some((px, w, _)) => self.store.save_icon(key, w as u32, &px),
-                None => {
-                    self.failed_icons.insert(key.clone());
-                }
-            }
-        }
-        !missing.is_empty()
+    /// Every launchable app, A to Z, and a number that changes when it does.
+    pub fn apps(&self) -> (&[AppRecord], u64) {
+        (&self.records, self.records_gen)
+    }
+
+    /// Home pressed while already Home: slide back to the first page.
+    pub fn go_to_first_page(&mut self, now: Instant) {
+        self.pressed = None;
+        self.pager.snap_to(0, now);
     }
 
     fn metrics_for(&mut self, screen: (i32, i32), insets: Insets) -> HomeMetrics {
@@ -205,8 +193,6 @@ impl Home {
                 log::info!("home metrics: icon {:.0}px cell {:.0}x{:.0} insets {:?}", m.icon, m.cell_w, m.cell_h, insets);
                 self.metrics = Some((m, screen, insets));
                 self.pager.set_width(screen.0 as f32);
-                // Icons at a new size: the saved ones no longer match.
-                self.missing_icons.clear();
                 m
             }
         }
@@ -268,43 +254,6 @@ impl Home {
         }
     }
 
-    /// Queue one icon: from the atlas, else from disk, else ask for it later.
-    fn icon_uv(&mut self, gl: &glow::Context, r: &mut Renderer, key: &AppKey, size: u32) -> Option<[f32; 4]> {
-        let ak = atlas_key(key);
-        if let Some(uv) = r.icon_uv(&ak) {
-            return Some(uv);
-        }
-        if self.failed_icons.contains(key) {
-            return None;
-        }
-        match self.store.load_icon(key, size) {
-            Some((px, w, h)) => r.icon(gl, &ak, &px, w, h),
-            None => {
-                if !self.missing_icons.contains(key) {
-                    self.missing_icons.push(key.clone());
-                }
-                None
-            }
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn draw_icon(&mut self, gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, key: &AppKey, ir: (f32, f32, f32, f32), size: u32, pressed: bool) {
-        let (mut x, mut y, mut s) = (ir.0, ir.1, ir.2);
-        let mut opacity = 1.0;
-        if pressed {
-            let shrunk = s * 0.92;
-            x += (s - shrunk) / 2.0;
-            y += (s - shrunk) / 2.0;
-            s = shrunk;
-            opacity = 0.7;
-        }
-        match self.icon_uv(gl, r, key, size) {
-            Some(uv) => batch.image(Rect::new(x, y, s, s), uv, s / 2.0, opacity),
-            None => batch.circle(x + s / 2.0, y + s / 2.0, s / 2.0, Rgba::hex(0x737373).with_alpha(opacity)),
-        }
-    }
-
     /// Text with a soft dark shadow so it reads on light wallpapers.
     #[allow(clippy::too_many_arguments)]
     fn shadowed(&self, gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, s: &str, x: f32, baseline: f32, em: f32, max_w: f32, bold: bool) {
@@ -314,15 +263,13 @@ impl Home {
     }
 
     /// Build the frame. Returns true while something is still moving.
-    pub fn draw(&mut self, gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, screen: (i32, i32), insets: Insets, now: Instant) -> bool {
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw(&mut self, gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, icons: &mut Icons, screen: (i32, i32), insets: Insets, now: Instant) -> bool {
         let m = self.metrics_for(screen, insets);
         let d = self.density;
         let size = m.icon.round() as u32;
         let m_icon = size as f32;
-
-        for key in std::mem::take(&mut self.stale_icons) {
-            r.forget_icon(&atlas_key(&key));
-        }
+        icons.set_size(size);
 
         // Date.
         let date = self.date.clone();
@@ -344,7 +291,7 @@ impl Home {
                     let ir = m.icon_rect(col, row);
                     let ir = (ir.0 + shift, ir.1, m_icon, m_icon);
                     let pressed = self.pressed == Some(Target::Cell { page, col, row });
-                    self.draw_icon(gl, r, batch, &key, ir, size, pressed);
+                    icons.draw(gl, r, batch, &key, (ir.0, ir.1, m_icon), pressed, 1.0);
                     let label = self.labels.get(&key).cloned().unwrap_or_default();
                     if !label.is_empty() {
                         let lw = r.measure(&label, label_em, label_max, false);
@@ -373,7 +320,8 @@ impl Home {
         for i in 0..DOCK_SLOTS {
             let Some(key) = self.layout.dock[i as usize].clone() else { continue };
             let pressed = self.pressed == Some(Target::Dock(i));
-            self.draw_icon(gl, r, batch, &key, m.dock_icon_rect(i), size, pressed);
+            let ir = m.dock_icon_rect(i);
+            icons.draw(gl, r, batch, &key, (ir.0, ir.1, m_icon), pressed, 1.0);
         }
 
         // Search pill.
@@ -394,9 +342,5 @@ impl Home {
         r.text(gl, batch, "Search apps, contacts, settings", hint_x, baseline, hint_em, px + pw - hint_x - 20.0 * d, ink, false);
 
         self.pager.animating(now) || self.pager.dragging_pages()
-    }
-
-    pub fn has_missing_icons(&self) -> bool {
-        !self.missing_icons.is_empty()
     }
 }

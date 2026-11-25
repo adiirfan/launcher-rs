@@ -10,6 +10,7 @@ use android_activity::AndroidApp;
 use launcher_core::applist::{self, AppRecord};
 use launcher_core::home::{AppKey, HomeLayout};
 
+#[derive(Clone)]
 pub struct Store {
     /// The app's private folder; the home layout lives here.
     data: PathBuf,

@@ -6,8 +6,12 @@ mod render;
 mod jni_util;
 mod apps;
 mod cache;
+mod contacts;
+mod drawer;
 mod fonts;
 mod home;
+mod icons;
+mod settings_pages;
 mod refresh;
 mod keyboard;
 mod system;
@@ -22,8 +26,10 @@ use launcher_core::ime::ImeState;
 use launcher_core::refresh::{RateVote, RefreshPolicy};
 use launcher_draw::batch::Batch;
 
+use drawer::{Drawer, DrawerAction};
 use gl_surface::GlSurface;
 use home::{Action, Home, Touch, TouchKind};
+use icons::Icons;
 use render::Renderer;
 
 const REPORT_EVERY: Duration = Duration::from_secs(5);
@@ -45,8 +51,12 @@ fn android_main(app: AndroidApp) {
     let mut gfx: Option<GlSurface> = None;
     let mut renderer: Option<Renderer> = None;
     let mut batch = Batch::new();
-    let mut home = Home::load(&app);
+    let store = cache::Store::open(&app);
+    let mut home = Home::load(&app, store.clone());
+    let mut icons = Icons::new(store);
+    let mut drawer = Drawer::new(app.config().density().unwrap_or(160) as f32 / 160.0);
     let mut first_frame = true;
+    let mut last_insets: Option<Insets> = None;
     let mut needs_refresh = true;
     let mut visible = true;
     let mut minute = current_minute();
@@ -94,6 +104,7 @@ fn android_main(app: AndroidApp) {
                     MainEvent::Resume { .. } => {
                         visible = true;
                         needs_refresh = true;
+                        drawer.recheck_permission();
                         sched.request_redraw();
                     }
                     MainEvent::Pause => visible = false,
@@ -112,7 +123,13 @@ fn android_main(app: AndroidApp) {
             policy.note_activity(Instant::now());
             sched.request_redraw();
         }
+        let now = Instant::now();
         for t in input.touches {
+            if drawer.is_open() {
+                let action = drawer.touch(t, home.apps().0);
+                drawer_action(&app, &mut drawer, action, now);
+                continue;
+            }
             match home.touch(t) {
                 Action::None => {}
                 Action::Launch(key) => {
@@ -120,18 +137,45 @@ fn android_main(app: AndroidApp) {
                     log::info!("launch {} -> {ok}", key.package);
                 }
                 Action::OpenNotifications => system::expand_notifications(&app),
-                Action::OpenAppList => log::info!("open app list (plan 4)"),
-                Action::OpenSearch => log::info!("open search (plan 4)"),
+                Action::OpenAppList => {
+                    // Start from an empty box, whatever the keyboard last held.
+                    keyboard::clear_text(&app);
+                    drawer.open(now, false);
+                }
+                Action::OpenSearch => {
+                    keyboard::clear_text(&app);
+                    drawer.open(now, true);
+                    keyboard::show(&app, true);
+                }
             }
         }
-        if input.back {
-            keyboard::show(&app, false);
+        if input.back && drawer.is_open() {
+            drawer_action(&app, &mut drawer, DrawerAction::Close, now);
+            sched.request_redraw();
+        }
+        if keyboard::take_home() {
+            if drawer.is_open() {
+                drawer_action(&app, &mut drawer, DrawerAction::Close, now);
+            } else {
+                home.go_to_first_page(now);
+            }
+            sched.request_redraw();
         }
         if let Some(state) = keyboard::take() {
             on_text(&state);
+            if drawer.is_open() {
+                drawer.set_query(&state.text);
+                sched.request_redraw();
+            }
         }
-        if keyboard::take_action() {
-            log::info!("action");
+        if keyboard::take_action() && drawer.is_open() {
+            let action = drawer.first_match(home.apps().0);
+            drawer_action(&app, &mut drawer, action, now);
+        }
+        if let Some(granted) = keyboard::take_permission() {
+            log::info!("contacts permission: {granted}");
+            drawer.permission_answer(&app, granted);
+            sched.request_redraw();
         }
 
         let m = current_minute();
@@ -152,7 +196,13 @@ fn android_main(app: AndroidApp) {
                 r.begin_frame();
                 batch.clear();
                 let screen = g.size();
-                let moving = home.draw(g.gl(), r, &mut batch, screen, insets(&app, screen), now);
+                let ins = insets(&app, screen, &mut last_insets);
+                icons.begin_frame(r);
+                let mut moving = false;
+                if !drawer.covers_home(now) {
+                    moving |= home.draw(g.gl(), r, &mut batch, &mut icons, screen, ins, now);
+                }
+                moving |= drawer.draw(g.gl(), r, &mut batch, &mut icons, home.apps(), screen, ins, now);
                 r.draw(g.gl(), &batch, screen);
                 if let Err(e) = g.swap() {
                     log::error!("swap failed: {e}");
@@ -183,12 +233,15 @@ fn android_main(app: AndroidApp) {
 
         // Slow work goes after a frame is on screen, never before.
         if !first_frame {
-            if home.has_missing_icons() && home.load_missing_icons(&app) {
+            if icons.has_missing() && icons.load_missing(&app) {
+                sched.request_redraw();
+            }
+            if drawer.after_frame(&app) {
                 sched.request_redraw();
             }
             if needs_refresh {
                 needs_refresh = false;
-                if home.refresh(&app) {
+                if home.refresh(&app, &mut icons) {
                     sched.request_redraw();
                 }
                 if home.update_date(&app) {
@@ -219,18 +272,27 @@ fn android_main(app: AndroidApp) {
 
 /// Space the status and navigation bars take, from the window's content
 /// area. Before Android reports it, assume the usual 24 dp and 48 dp.
-fn insets(app: &AndroidApp, (w, h): (i32, i32)) -> Insets {
+/// The content area also shrinks when the keyboard opens; a bottom edge
+/// taller than any navigation bar is the keyboard, so the last real value
+/// is kept instead and nothing on screen changes size.
+fn insets(app: &AndroidApp, (w, h): (i32, i32), last: &mut Option<Insets>) -> Insets {
+    let d = app.config().density().unwrap_or(160) as f32 / 160.0;
     let r = app.content_rect();
+    let fallback = Insets { top: 24.0 * d, bottom: 48.0 * d, left: 0.0, right: 0.0 };
     if r.right <= r.left || r.bottom <= r.top {
-        let d = app.config().density().unwrap_or(160) as f32 / 160.0;
-        return Insets { top: 24.0 * d, bottom: 48.0 * d, left: 0.0, right: 0.0 };
+        return last.unwrap_or(fallback);
     }
-    Insets {
+    let mut ins = Insets {
         top: r.top as f32,
         bottom: (h - r.bottom).max(0) as f32,
         left: r.left as f32,
         right: (w - r.right).max(0) as f32,
+    };
+    if ins.bottom > 100.0 * d {
+        ins.bottom = last.map_or(fallback.bottom, |l| l.bottom);
     }
+    *last = Some(ins);
+    ins
 }
 
 fn current_minute() -> u64 {
@@ -300,9 +362,44 @@ fn drain_input(app: &AndroidApp) -> InputOut {
     out
 }
 
+/// Logs the shape of the typed text, never the text itself.
 fn on_text(state: &ImeState) {
     let compose = state.compose.map_or("none".to_string(), |c| format!("{}..{}", c.0, c.1));
-    log::info!("text: {:?} sel={}..{} compose={}", state.text, state.selection.0, state.selection.1, compose);
+    log::info!("text: {} chars sel={}..{} compose={}", state.text.chars().count(), state.selection.0, state.selection.1, compose);
+}
+
+fn drawer_action(app: &AndroidApp, drawer: &mut Drawer, action: DrawerAction, now: Instant) {
+    match action {
+        DrawerAction::None => {}
+        DrawerAction::Launch(key) => {
+            let ok = apps::launch(app, &key);
+            log::info!("launch {} -> {ok}", key.package);
+            if ok {
+                drawer.close(now, false);
+                keyboard::show(app, false);
+                keyboard::clear_text(app);
+            }
+        }
+        DrawerAction::Close => {
+            drawer.close(now, true);
+            keyboard::show(app, false);
+            keyboard::clear_text(app);
+        }
+        DrawerAction::ShowKeyboard => keyboard::show(app, true),
+        DrawerAction::ClearText => keyboard::clear_text(app),
+        DrawerAction::OpenSettings(action) => {
+            let ok = system::start(app, action, None);
+            log::info!("settings page {action} -> {ok}");
+        }
+        DrawerAction::OpenContact(c) => {
+            let ok = system::start(app, "android.intent.action.VIEW", Some(&c.lookup_uri));
+            log::info!("open contact -> {ok}");
+        }
+        DrawerAction::AskContacts => keyboard::ask_contacts(app),
+        DrawerAction::OpenAppDetails => {
+            system::open_own_app_details(app);
+        }
+    }
 }
 
 unsafe extern "C" {
