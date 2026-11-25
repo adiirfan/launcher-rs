@@ -25,12 +25,71 @@ pub fn round_square_mask(rgba: &mut [u8], size: u32, radius: f32) {
     }
 }
 
+/// Some apps ship an icon picture with a wide empty border, so it looks
+/// small next to the others. For a `size`×`size` RGBA drawing of one, the
+/// bounds (left, top, right, bottom) to draw it at again so the artwork
+/// fills the square, centred; None if it already nearly does.
+pub fn fill_bounds(rgba: &[u8], size: u32) -> Option<(i32, i32, i32, i32)> {
+    let (mut x0, mut y0, mut x1, mut y1) = (size, size, 0, 0);
+    for y in 0..size {
+        for x in 0..size {
+            if rgba[((y * size + x) * 4 + 3) as usize] > 16 {
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
+            }
+        }
+    }
+    if x1 <= x0 {
+        return None;
+    }
+    let side = (x1 - x0).max(y1 - y0) as f32;
+    let n = size as f32;
+    if side / n >= 0.85 {
+        return None;
+    }
+    let scale = (n / side).min(2.5);
+    let (cx, cy) = ((x0 + x1) as f32 / 2.0, (y0 + y1) as f32 / 2.0);
+    let (left, top) = (n / 2.0 - cx * scale, n / 2.0 - cy * scale);
+    Some((left.round() as i32, top.round() as i32, (left + n * scale).round() as i32, (top + n * scale).round() as i32))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn white(size: u32) -> Vec<u8> {
         vec![255; (size * size * 4) as usize]
+    }
+
+    /// A `size` image, clear except an opaque square from `a` to `b`
+    /// (exclusive) on both axes.
+    fn square(size: u32, a: u32, b: u32) -> Vec<u8> {
+        let mut img = vec![0; (size * size * 4) as usize];
+        for y in a..b {
+            for x in a..b {
+                let i = ((y * size + x) * 4) as usize;
+                img[i..i + 4].copy_from_slice(&[200, 0, 0, 255]);
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn padded_icon_is_drawn_bigger_to_fill_the_square() {
+        // Artwork in the middle half of a 100 px frame: draw it twice as big,
+        // centred on the artwork.
+        let img = square(100, 25, 75);
+        assert_eq!(fill_bounds(&img, 100), Some((-50, -50, 150, 150)));
+        // Off-centre artwork is moved to the middle too.
+        let img = square(100, 10, 60);
+        assert_eq!(fill_bounds(&img, 100), Some((-20, -20, 180, 180)));
+    }
+
+    #[test]
+    fn nearly_full_or_empty_icons_are_left_alone() {
+        assert_eq!(fill_bounds(&square(100, 5, 95), 100), None);
+        assert_eq!(fill_bounds(&square(100, 0, 0), 100), None);
+        // A tiny dot is not blown up past 2.5x.
+        assert_eq!(fill_bounds(&square(100, 45, 55), 100), Some((-75, -75, 175, 175)));
     }
 
     fn px(img: &[u8], size: u32, x: u32, y: u32) -> [u8; 4] {

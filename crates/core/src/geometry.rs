@@ -22,6 +22,9 @@ pub const ALL_APPS_SLOT: u32 = 2;
 pub const HOLO_COLS: u32 = 4;
 pub const HOLO_ROWS: u32 = 4;
 pub const CLOCK_SP: f32 = 84.0;
+/// On a wide screen (a tablet, a foldable opened up) Home keeps to a centred
+/// column this wide, so the grid, dock and search bar stay phone-sized.
+pub const COLUMN_MAX_DP: f32 = 520.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct HomeMetrics {
@@ -55,12 +58,14 @@ impl HomeMetrics {
     pub fn new(screen_w: f32, screen_h: f32, density: f32, insets: Insets, cols: u32, rows: u32, info_line: bool) -> HomeMetrics {
         let d = density;
         let inner_w = screen_w - insets.left - insets.right;
+        let col_w = inner_w.min(COLUMN_MAX_DP * d);
+        let left = insets.left + (inner_w - col_w) / 2.0;
 
         let search_h = 48.0 * d;
-        let search = (insets.left + 12.0 * d, screen_h - insets.bottom - 8.0 * d - search_h, inner_w - 24.0 * d, search_h);
+        let search = (left + 12.0 * d, screen_h - insets.bottom - 8.0 * d - search_h, col_w - 24.0 * d, search_h);
         let dock_h = 72.0 * d;
         let dock_top = search.1 - 8.0 * d - dock_h;
-        let page_bar = (insets.left + 24.0 * d, dock_top - 12.0 * d - 3.0 * d, inner_w - 48.0 * d, 3.0 * d);
+        let page_bar = (left + 24.0 * d, dock_top - 12.0 * d - 3.0 * d, col_w - 48.0 * d, 3.0 * d);
 
         let clock_baseline = insets.top + 56.0 * d + CLOCK_SP * d * 0.75;
         let date_baseline = clock_baseline + 26.0 * d;
@@ -68,7 +73,7 @@ impl HomeMetrics {
         // One more line under the date (next event or music) pushes the grid down.
         let grid_top = insets.top + 160.0 * d + if info_line { 24.0 * d } else { 0.0 };
         let grid_bottom = page_bar.1 - 8.0 * d;
-        let cell_w = (inner_w - 16.0 * d) / cols as f32;
+        let cell_w = (col_w - 16.0 * d) / cols as f32;
         let cell_h = ((grid_bottom - grid_top) / rows as f32).max(0.0);
         // The label takes 6 dp of gap plus an 18 dp line; keep 4 dp spare.
         let icon = (56.0 * d).min(cell_h - 28.0 * d).max(0.0);
@@ -82,7 +87,7 @@ impl HomeMetrics {
             icon,
             cell_w,
             cell_h,
-            grid_left: insets.left + 8.0 * d,
+            grid_left: left + 8.0 * d,
             grid_top,
             label_gap: 6.0 * d,
             clock_baseline,
@@ -91,8 +96,8 @@ impl HomeMetrics {
             page_bar,
             dock_top,
             dock_h,
-            dock_left: insets.left + 16.0 * d,
-            dock_slot_w: (inner_w - 32.0 * d) / DOCK_SLOTS as f32,
+            dock_left: left + 16.0 * d,
+            dock_slot_w: (col_w - 32.0 * d) / DOCK_SLOTS as f32,
             search,
         }
     }
@@ -154,6 +159,22 @@ mod tests {
 
     fn centre(r: (f32, f32, f32, f32)) -> (f32, f32) {
         (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0)
+    }
+
+    #[test]
+    fn wide_screen_keeps_home_in_a_centred_column() {
+        // The Fold's inner screen, sideways: 2504 x 2256 at 3x.
+        let ins = Insets { top: 72.0, bottom: 72.0, left: 0.0, right: 0.0 };
+        let m = HomeMetrics::new(2504.0, 2256.0, 3.0, ins, HOLO_COLS, HOLO_ROWS, false);
+        let mid = 1252.0;
+        assert!((centre(m.search).0 - mid).abs() < 0.01);
+        assert_eq!(m.search.2, (COLUMN_MAX_DP - 24.0) * 3.0);
+        assert!((m.cell_w - (COLUMN_MAX_DP - 16.0) * 3.0 / 4.0).abs() < 0.01);
+        assert!((m.grid_left + 2.0 * m.cell_w - mid).abs() < 0.01);
+        assert!((centre(m.all_apps_rect()).0 - mid).abs() < 0.01);
+        assert!((centre(m.page_bar).0 - mid).abs() < 0.01);
+        assert_eq!(m.hit(centre(m.all_apps_rect()).0, centre(m.all_apps_rect()).1), Some(Hit::AllApps));
+        assert_eq!(m.hit(m.grid_left - 10.0, m.grid_top + 10.0), None);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use android_activity::AndroidApp;
 use launcher_core::applist::AppRecord;
-use launcher_core::drawer_geometry::{COLS, DrawerMetrics};
+use launcher_core::drawer_geometry::DrawerMetrics;
 use launcher_core::geometry::Insets;
 use launcher_core::home::AppKey;
 use launcher_core::longpress::{LONG_PRESS, LongPress};
@@ -304,7 +304,7 @@ impl Drawer {
     /// ends, where the result rows start, their total height, and the end.
     fn extras_layout(&self, m: &DrawerMetrics) -> (f32, f32, f32, f32) {
         let d = self.density;
-        let grid_rows = self.results.len().div_ceil(COLS);
+        let grid_rows = self.results.len().div_ceil(m.cols);
         let grid_end = m.pad_top + grid_rows as f32 * m.row_h;
         let no_match = if self.has_query() && self.results.is_empty() { 36.0 * d } else { 0.0 };
         let rows_top = grid_end + no_match + 20.0 * d + self.title_h();
@@ -324,7 +324,7 @@ impl Drawer {
     }
 
     fn update_bounds(&mut self, m: &DrawerMetrics) {
-        let rows = self.results.len().div_ceil(COLS);
+        let rows = self.results.len().div_ceil(m.cols);
         let extra = if self.has_query() { self.extras_layout(m).3 - (m.pad_top + rows as f32 * m.row_h) } else { 0.0 };
         let content = m.content_height(rows, extra);
         self.scroller.set_bounds(content - m.visible_height());
@@ -493,8 +493,8 @@ impl Drawer {
         let top = scroll - m.pad_top;
         let first_row = (top / m.row_h).floor().max(0.0) as usize;
         let last_row = ((top + m.home_bar.1 - m.list_top - lift) / m.row_h).floor().max(0.0) as usize;
-        let start = first_row * COLS;
-        let end = ((last_row + 1) * COLS).min(self.results.len());
+        let start = first_row * m.cols;
+        let end = ((last_row + 1) * m.cols).min(self.results.len());
         for slot in start..end {
             let rec = &records[self.results[slot]];
             let (ix, iy, is, _) = m.icon_rect(slot, scroll);

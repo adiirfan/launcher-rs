@@ -2,7 +2,10 @@
 
 use crate::geometry::Insets;
 
-pub const COLS: usize = 4;
+/// At least this many columns; more on wide screens, each at least
+/// CELL_MIN_DP wide.
+pub const MIN_COLS: usize = 4;
+pub const CELL_MIN_DP: f32 = 100.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct DrawerMetrics {
@@ -16,6 +19,7 @@ pub struct DrawerMetrics {
     pub field: (f32, f32, f32, f32),
     pub list_top: f32,
     pub list_left: f32,
+    pub cols: usize,
     pub cell_w: f32,
     pub row_h: f32,
     /// Space above the first row inside the list.
@@ -32,6 +36,8 @@ impl DrawerMetrics {
         let header = (insets.left, insets.top, inner_w, 56.0 * d);
         let field = (insets.left + 20.0 * d, header.1 + header.3 + 14.0 * d, inner_w - 40.0 * d, 44.0 * d);
         let bar_h = 64.0 * d;
+        let list_w = inner_w - 16.0 * d;
+        let cols = ((list_w / (CELL_MIN_DP * d)) as usize).max(MIN_COLS);
         DrawerMetrics {
             screen_w,
             screen_h,
@@ -42,7 +48,8 @@ impl DrawerMetrics {
             field,
             list_top: field.1 + field.3 + 6.0 * d,
             list_left: insets.left + 8.0 * d,
-            cell_w: (inner_w - 16.0 * d) / COLS as f32,
+            cols,
+            cell_w: list_w / cols as f32,
             row_h: icon + 6.0 * d + 18.0 * d + 22.0 * d,
             pad_top: 14.0 * d,
             label_gap: 6.0 * d,
@@ -61,7 +68,7 @@ impl DrawerMetrics {
     }
 
     pub fn cell_rect(&self, i: usize, scroll: f32) -> (f32, f32, f32, f32) {
-        let (col, row) = ((i % COLS) as f32, (i / COLS) as f32);
+        let (col, row) = ((i % self.cols) as f32, (i / self.cols) as f32);
         (self.list_left + col * self.cell_w, self.list_top + self.pad_top + row * self.row_h - scroll, self.cell_w, self.row_h)
     }
 
@@ -75,14 +82,14 @@ impl DrawerMetrics {
             return None;
         }
         let rx = x - self.list_left;
-        if rx < 0.0 || rx >= self.cell_w * COLS as f32 {
+        if rx < 0.0 || rx >= self.cell_w * self.cols as f32 {
             return None;
         }
         let ry = y - self.list_top - self.pad_top + scroll;
         if ry < 0.0 {
             return None;
         }
-        let i = (ry / self.row_h) as usize * COLS + (rx / self.cell_w) as usize;
+        let i = (ry / self.row_h) as usize * self.cols + (rx / self.cell_w) as usize;
         (i < count).then_some(i)
     }
 }
@@ -121,6 +128,22 @@ mod tests {
         let last = m.cell_rect(3, 0.0);
         assert!((last.0 + last.2 - 1056.0).abs() < 0.01);
         assert_eq!(m.cell_rect(4, 0.0).1, m.cell_rect(0, 0.0).1 + m.row_h);
+    }
+
+    #[test]
+    fn wide_screen_fits_more_columns() {
+        let m = DrawerMetrics::new(2504.0, 2256.0, 3.0, Insets { top: 72.0, bottom: 72.0, left: 0.0, right: 0.0 }, 150.0);
+        assert_eq!(m.cols, 8);
+        let last = m.cell_rect(7, 0.0);
+        assert!((last.0 + last.2 - (2504.0 - 24.0)).abs() < 0.01);
+        assert_eq!(m.cell_rect(8, 0.0).1, m.cell_rect(0, 0.0).1 + m.row_h);
+        let (x, y) = centre(m.icon_rect(13, 0.0));
+        assert_eq!(m.hit_cell(x, y, 0.0, 61), Some(13));
+    }
+
+    #[test]
+    fn narrow_screen_keeps_four_columns() {
+        assert_eq!(m().cols, 4);
     }
 
     #[test]
