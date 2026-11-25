@@ -2,6 +2,8 @@
 
 use std::time::{Duration, Instant};
 
+use crate::velocity::Velocity;
+
 pub const SNAP: Duration = Duration::from_millis(220);
 const FLING_PX_PER_MS: f32 = 0.5;
 const DISTANCE: f32 = 0.3;
@@ -29,9 +31,6 @@ struct Drag {
     start_page: usize,
     x: f32,
     y: f32,
-    t: Instant,
-    /// Finger speed along x, px per ms.
-    vx: f32,
     lock: Lock,
 }
 
@@ -49,6 +48,7 @@ pub struct Pager {
     page: usize,
     drag: Option<Drag>,
     snap: Option<Snap>,
+    velocity: Velocity,
 }
 
 impl Pager {
@@ -57,7 +57,7 @@ impl Pager {
     }
 
     pub fn new_with_slop(pages: usize, page_w: f32, slop_px: f32) -> Pager {
-        Pager { pages: pages.max(1), page_w, slop: slop_px, page: 0, drag: None, snap: None }
+        Pager { pages: pages.max(1), page_w, slop: slop_px, page: 0, drag: None, snap: None, velocity: Velocity::new() }
     }
 
     pub fn set_pages(&mut self, n: usize) {
@@ -131,19 +131,17 @@ impl Pager {
         self.snap = None;
         let start_page = ((start_offset / self.page_w).round().max(0.0) as usize).min(self.pages - 1);
         self.page = start_page;
-        self.drag = Some(Drag { start_x: x, start_y: y, start_offset, start_page, x, y, t, vx: 0.0, lock: Lock::Undecided });
+        self.drag = Some(Drag { start_x: x, start_y: y, start_offset, start_page, x, y, lock: Lock::Undecided });
+        self.velocity.clear();
+        self.velocity.add(t, x, y);
     }
 
     pub fn touch_move(&mut self, x: f32, y: f32, t: Instant) {
         let slop = self.slop;
         let Some(d) = self.drag.as_mut() else { return };
-        let dt = (t - d.t).as_secs_f32() * 1000.0;
-        if dt > 0.0 {
-            d.vx = (x - d.x) / dt;
-        }
+        self.velocity.add(t, x, y);
         d.x = x;
         d.y = y;
-        d.t = t;
         if d.lock == Lock::Undecided {
             let (dx, dy) = ((x - d.start_x).abs(), (y - d.start_y).abs());
             if dx > slop && dx > dy {
@@ -170,7 +168,7 @@ impl Pager {
                 let from = self.offset(t);
                 self.drag = None;
                 let dragged = from - d.start_page as f32 * self.page_w;
-                let speed = -d.vx; // finger left = offset grows
+                let speed = -self.velocity.get().0; // finger left = offset grows
                 let target = if speed > FLING_PX_PER_MS || (speed > -FLING_PX_PER_MS && dragged > DISTANCE * self.page_w) {
                     d.start_page + 1
                 } else if speed < -FLING_PX_PER_MS || dragged < -DISTANCE * self.page_w {
@@ -271,6 +269,17 @@ mod tests {
         p.touch_move(340.0, 500.0, ms(t1, 25));
         p.touch_up(380.0, 500.0, ms(t1, 50));
         assert_eq!(p.page(), 0);
+    }
+
+    #[test]
+    fn lift_repeating_the_last_point_still_flicks() {
+        let t0 = Instant::now();
+        let mut p = Pager::new(2, W);
+        p.touch_down(800.0, 500.0, t0);
+        p.touch_move(760.0, 500.0, ms(t0, 20));
+        p.touch_move(720.0, 500.0, ms(t0, 40));
+        p.touch_up(720.0, 500.0, ms(t0, 48));
+        assert_eq!(p.page(), 1);
     }
 
     #[test]
