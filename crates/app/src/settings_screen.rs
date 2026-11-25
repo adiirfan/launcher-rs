@@ -138,7 +138,7 @@ impl SettingsScreen {
             shown: 0.0,
             slide: None,
             page: Page::Main,
-            scroller: Scroller::new(8.0 * density),
+            scroller: Scroller::new(8.0 * density, density),
             pressed: None,
             picker: false,
             blocks: Vec::new(),

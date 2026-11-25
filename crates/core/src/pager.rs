@@ -143,9 +143,15 @@ impl Pager {
     }
 
     pub fn touch_move(&mut self, x: f32, y: f32, t: Instant) {
+        if self.drag.is_some() {
+            self.velocity.add(t, x, y);
+        }
+        self.follow(x, y);
+    }
+
+    fn follow(&mut self, x: f32, y: f32) {
         let slop = self.slop;
         let Some(d) = self.drag.as_mut() else { return };
-        self.velocity.add(t, x, y);
         d.x = x;
         d.y = y;
         if d.lock == Lock::Undecided {
@@ -159,7 +165,8 @@ impl Pager {
     }
 
     pub fn touch_up(&mut self, x: f32, y: f32, t: Instant) -> Gesture {
-        self.touch_move(x, y, t);
+        self.follow(x, y);
+        self.velocity.lift(t);
         let Some(d) = self.drag else { return Gesture::None };
         match d.lock {
             Lock::Undecided => {

@@ -122,7 +122,7 @@ impl Drawer {
             contacts_for: None,
             permission: Permission::Unknown,
             recheck: false,
-            scroller: Scroller::new(8.0 * density),
+            scroller: Scroller::new(8.0 * density, density),
             metrics: None,
             pressed: None,
             press: LongPress::new(LONG_PRESS, 12.0 * density),
@@ -403,7 +403,11 @@ impl Drawer {
             TouchKind::Up => {
                 self.press.up();
                 let pressed = self.pressed.take();
-                match self.scroller.touch_up(t.x, t.y, t.t) {
+                let gesture = self.scroller.touch_up(t.x, t.y, t.t);
+                if let (ListGesture::Scroll, Some((px, ms))) = (gesture, self.scroller.glide()) {
+                    log::info!("glide {px:.0} px over {ms:.0} ms");
+                }
+                match gesture {
                     ListGesture::PullDown { dy } if dy > PULL_CLOSE_DP * self.density => DrawerAction::Close,
                     ListGesture::Tap { x, y } if pressed.is_some() && pressed == self.target_at(x, y, t.t) => {
                         self.tap(pressed.unwrap(), apps)
