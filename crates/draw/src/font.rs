@@ -41,6 +41,16 @@ impl FontSet {
         self.fonts.first().map_or(0.0, |f| f.as_scaled(PxScale::from(px)).ascent())
     }
 
+    /// Android sizes text by its em; ab_glyph scales by line height
+    /// (ascent - descent). Convert an em size in px to ab_glyph's scale.
+    pub fn px_for_em(&self, em_px: f32) -> f32 {
+        let Some(f) = self.fonts.first() else { return em_px };
+        match f.units_per_em() {
+            Some(upm) if upm > 0.0 => em_px * f.height_unscaled() / upm,
+            _ => em_px,
+        }
+    }
+
     pub fn raster(&self, c: char, px: f32) -> Option<GlyphBitmap> {
         if c.is_whitespace() {
             return None;
@@ -115,11 +125,20 @@ mod tests {
     }
 
     #[test]
+    fn em_size_converts_to_a_larger_line_height() {
+        let Some(f) = dejavu() else { return };
+        let set = FontSet::new(vec![f]);
+        let px = set.px_for_em(20.0);
+        assert!(px > 20.0 && px < 30.0, "{px}");
+    }
+
+    #[test]
     fn empty_set_is_harmless() {
         let set = FontSet::new(vec![]);
         assert!(set.is_empty());
         assert_eq!(set.advance('A', 20.0), 0.0);
         assert!(set.raster('A', 20.0).is_none());
         assert_eq!(set.ascent(20.0), 0.0);
+        assert_eq!(set.px_for_em(20.0), 20.0);
     }
 }

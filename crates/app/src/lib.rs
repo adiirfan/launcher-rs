@@ -37,7 +37,8 @@ fn android_main(app: AndroidApp) {
     let mut gfx: Option<GlSurface> = None;
     let mut renderer: Option<Renderer> = None;
     let mut batch = Batch::new();
-    let mut shown: Option<Shown> = None;
+    let mut scene: Option<Scene> = None;
+    let mut timings: Vec<Duration> = Vec::new();
     let mut frames: u32 = 0;
     let mut last_report = Instant::now();
     let mut quit = false;
@@ -81,10 +82,13 @@ fn android_main(app: AndroidApp) {
         let input = drain_input(&app);
         if let Some((x, y)) = input.tap {
             log::info!("tap at {x:.0},{y:.0}");
-            if let Some(s) = shown.as_ref().filter(|s| s.contains(x, y)) {
-                let ok = apps::launch(&app, &s.entry);
-                log::info!("launch {} -> {ok}", s.entry.package);
-            } else if y < KEYBOARD_TAP_ZONE {
+            if let Some(entry) = scene.as_ref().and_then(|s| s.hit(x, y)) {
+                let ok = apps::launch(&app, entry);
+                log::info!("launch {} -> {ok}", entry.package);
+            } else if y > KEYBOARD_TAP_ZONE {
+                // Empty space: force a redraw (used to time frames).
+                sched.request_redraw();
+            } else {
                 app.set_ime_editor_info(
                     InputType::TYPE_CLASS_TEXT | InputType::TYPE_TEXT_VARIATION_NORMAL,
                     TextInputAction::Search,
@@ -107,8 +111,17 @@ fn android_main(app: AndroidApp) {
                 let r = renderer.get_or_insert_with(|| {
                     Renderer::new(g.gl(), fonts::load_system_fonts(), fonts::load_system_fonts_bold())
                 });
-                let s = shown.get_or_insert_with(|| Shown::load(&app));
+                let s = scene.get_or_insert_with(|| Scene::load(&app));
+                let t0 = Instant::now();
                 draw(g, r, &mut batch, s);
+                timings.push(t0.elapsed());
+                if timings.len() == 10 {
+                    let worst = timings.iter().max().unwrap();
+                    let avg = timings.iter().sum::<Duration>() / 10;
+                    log::info!("frame time over 10: avg {:.2} ms, worst {:.2} ms",
+                        avg.as_secs_f64() * 1e3, worst.as_secs_f64() * 1e3);
+                    timings.clear();
+                }
                 if r.wants_redraw() {
                     sched.request_redraw();
                 }
@@ -174,33 +187,33 @@ fn on_text(state: &TextInputState) {
     );
 }
 
-/// The one app shown during the risk check: its entry, icon and where it sits.
-struct Shown {
-    entry: AppEntry,
-    icon: Option<(Vec<u8>, i32, i32)>,
-    rect: std::cell::Cell<[f32; 4]>,
+/// The drawing-kit check scene: shapes, text and the first 16 apps.
+struct Scene {
+    apps: Vec<(AppEntry, Option<(Vec<u8>, i32, i32)>)>,
+    density: f32,
+    hits: std::cell::RefCell<Vec<(Rect, usize)>>,
 }
 
-impl Shown {
-    fn load(app: &AndroidApp) -> Shown {
-        let apps = apps::list_apps(app);
-        log::info!("apps: {}", apps.len());
-        for a in apps.iter().take(5) {
-            log::info!("  {} ({}/{})", a.label, a.package, a.activity);
-        }
-        let entry = apps.into_iter().next().unwrap_or(AppEntry {
-            label: "none".into(),
-            package: "none".into(),
-            activity: "none".into(),
-        });
+impl Scene {
+    fn load(app: &AndroidApp) -> Scene {
+        let all = apps::list_apps(app);
+        log::info!("apps: {}", all.len());
         let size = icon_px(app);
-        let icon = apps::load_icon_rgba(app, &entry, size);
-        Shown { entry, icon, rect: std::cell::Cell::new([0.0; 4]) }
+        let apps = all
+            .into_iter()
+            .take(16)
+            .map(|e| {
+                let icon = apps::load_icon_rgba(app, &e, size);
+                (e, icon)
+            })
+            .collect();
+        let density = app.config().density().unwrap_or(160) as f32 / 160.0;
+        Scene { apps, density, hits: Default::default() }
     }
 
-    fn contains(&self, x: f32, y: f32) -> bool {
-        let [rx, ry, rw, rh] = self.rect.get();
-        x >= rx && x < rx + rw && y >= ry && y < ry + rh
+    fn hit(&self, x: f32, y: f32) -> Option<&AppEntry> {
+        let hits = self.hits.borrow();
+        hits.iter().find(|(r, _)| r.contains(x, y)).map(|&(_, i)| &self.apps[i].0)
     }
 }
 
@@ -210,21 +223,58 @@ fn icon_px(app: &AndroidApp) -> i32 {
     56 * dpi / 160
 }
 
-fn draw(g: &GlSurface, r: &mut Renderer, batch: &mut Batch, shown: &Shown) {
+fn draw(g: &GlSurface, r: &mut Renderer, batch: &mut Batch, scene: &Scene) {
     let gl = g.gl();
     let (w, h) = g.size();
+    let (wf, d) = (w as f32, scene.density);
+    let dp = |v: f32| v * d;
     r.begin_frame();
     batch.clear();
-    let side = 168.0_f32;
-    let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
-    let rect = Rect::new(cx - side / 2.0, cy - side / 2.0, side, side);
-    shown.rect.set([rect.x, rect.y, rect.w, rect.h]);
-    let uv = shown.icon.as_ref().and_then(|(px, iw, ih)| r.icon(gl, &shown.entry.package, px, *iw as u32, *ih as u32));
-    match uv {
-        Some(uv) => batch.image(rect, uv, side / 2.0, 1.0),
-        // Placeholder when the icon can't be loaded.
-        None => batch.circle(cx, cy, side / 2.0, Rgba::hex(0x737373)),
+
+    let white = Rgba::hex(0xFFFFFF);
+    let holo = Rgba::hex(0x33B5E5);
+
+    // Panel with title, divider, outline pill, circle and glow.
+    let panel = Rect::new(dp(16.0), dp(40.0), wf - dp(32.0), dp(190.0));
+    batch.rect(panel, Rgba::hex(0x101917).with_alpha(0.92), dp(24.0));
+    r.text(gl, batch, "Drawing kit ✓", panel.x + dp(20.0), panel.y + dp(40.0), dp(20.0), panel.w - dp(40.0), white, true);
+    batch.line(panel.x + dp(20.0), panel.y + dp(58.0), panel.x + panel.w - dp(20.0), panel.y + dp(58.0), 1.0, white.with_alpha(0.2));
+    let pill = Rect::new(panel.x + dp(20.0), panel.y + dp(80.0), dp(150.0), dp(52.0));
+    batch.outline(pill, Rgba::hex(0x9CC9B8), dp(26.0), dp(2.0));
+    r.text(gl, batch, "Outline", pill.x + dp(24.0), pill.y + dp(32.0), dp(16.0), dp(110.0), Rgba::hex(0x9CC9B8), false);
+    batch.circle(pill.x + pill.w + dp(44.0), pill.y + pill.h / 2.0, dp(22.0), Rgba::hex(0xFF8800));
+    let gc = (panel.x + panel.w - dp(60.0), pill.y + pill.h / 2.0);
+    let gr = Rect::new(gc.0 - dp(22.0), gc.1 - dp(22.0), dp(44.0), dp(44.0));
+    batch.glow(gr, holo.with_alpha(0.8), dp(22.0), dp(14.0));
+    batch.circle(gc.0, gc.1, dp(22.0), holo);
+
+    // A long mixed-script line that has to be cut.
+    r.text(gl, batch, "設定 Settings 日本語テスト — a very long label that must be cut",
+        dp(16.0), dp(262.0), dp(14.0), wf - dp(32.0), white, false);
+
+    // 4-column grid of real apps, round icons, labels underneath.
+    let cell_w = (wf - dp(16.0)) / 4.0;
+    let icon = dp(56.0);
+    let mut hits = scene.hits.borrow_mut();
+    hits.clear();
+    for (i, (entry, px)) in scene.apps.iter().enumerate() {
+        let (col, row) = ((i % 4) as f32, (i / 4) as f32);
+        let x = dp(8.0) + col * cell_w;
+        let y = dp(290.0) + row * dp(100.0);
+        let ir = Rect::new(x + (cell_w - icon) / 2.0, y, icon, icon);
+        let uv = px.as_ref().and_then(|(p, iw, ih)| r.icon(gl, &entry.package, p, *iw as u32, *ih as u32));
+        match uv {
+            Some(uv) => batch.image(ir, uv, icon / 2.0, 1.0),
+            None => batch.circle(ir.x + icon / 2.0, ir.y + icon / 2.0, icon / 2.0, Rgba::hex(0x737373)),
+        }
+        // Centre the label: measure first, then place.
+        let max = cell_w - dp(8.0);
+        let mut probe = Batch::new();
+        let lw = r.text(gl, &mut probe, &entry.label, 0.0, 0.0, dp(12.0), max, white, false);
+        r.text(gl, batch, &entry.label, x + (cell_w - lw) / 2.0, y + icon + dp(20.0), dp(12.0), max, white, false);
+        hits.push((ir, i));
     }
+
     r.draw(gl, batch, (w, h));
     if let Err(e) = g.swap() {
         log::error!("swap failed: {e}");

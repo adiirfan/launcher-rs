@@ -244,7 +244,8 @@ impl Renderer {
         }
     }
 
-    /// Lay out one line and queue its glyphs. Returns the laid-out width.
+    /// Lay out one line at an Android-style em size and queue its glyphs.
+    /// Returns the laid-out width.
     #[allow(clippy::too_many_arguments)]
     pub fn text(
         &mut self,
@@ -253,12 +254,13 @@ impl Renderer {
         s: &str,
         x: f32,
         baseline: f32,
-        px: f32,
+        em_px: f32,
         max_w: f32,
         color: Rgba,
         bold: bool,
     ) -> f32 {
         let fonts = if bold { &self.bold } else { &self.fonts };
+        let px = fonts.px_for_em(em_px);
         let line = layout_line(s, px, max_w, fonts);
         let size_key = (px * 2.0).round() as u32;
         for &(c, gx) in &line.glyphs {
@@ -292,9 +294,6 @@ impl Renderer {
         line.width
     }
 
-    pub fn ascent(&self, px: f32) -> f32 {
-        self.fonts.ascent(px)
-    }
 
     pub fn draw(&mut self, gl: &glow::Context, batch: &Batch, screen: (i32, i32)) {
         let items = batch.instances();
