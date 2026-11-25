@@ -221,6 +221,13 @@ impl Icons {
         false
     }
 
+    /// Wait for queued uploads to finish, so the graphics driver can reuse
+    /// its temporary copies instead of piling up more (seen on Adreno).
+    pub fn settle(gl: &glow::Context) {
+        use glow::HasContext;
+        unsafe { gl.finish() };
+    }
+
     /// Give back the compressed copies; they're read again when needed.
     pub fn trim(&mut self) {
         self.bytes = HashMap::new();
