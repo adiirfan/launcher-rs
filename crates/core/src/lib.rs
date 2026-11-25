@@ -5,3 +5,4 @@ pub mod geometry;
 pub mod home;
 pub mod pager;
 pub mod applist;
+pub mod search;
