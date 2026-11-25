@@ -6,7 +6,7 @@ use launcher_draw::batch::Batch;
 use launcher_draw::{Rect, Rgba};
 
 use crate::fonts::Weight;
-use crate::holo::{ACCENT, BLACK, DIVIDER, WHITE};
+use crate::holo::{self, BLACK, DIVIDER, WHITE};
 use crate::render::Renderer;
 
 pub type R4 = (f32, f32, f32, f32);
@@ -46,11 +46,11 @@ pub fn draw_top_bar(gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, bar
             batch.rect(Rect::new(px, y + 18.0 * d, 1.0 * d, h - 36.0 * d), Rgba::hex(DIVIDER), 0.0);
         }
         if hover == Some(i) && enabled[i] {
-            batch.rect(Rect::new(px, y, part, h - 1.0 * d), Rgba::hex(ACCENT).with_alpha(0.18), 0.0);
+            batch.rect(Rect::new(px, y, part, h - 1.0 * d), Rgba::hex(holo::accent()).with_alpha(0.18), 0.0);
         }
         let color = match (enabled[i], hover == Some(i)) {
             (false, _) => Rgba::hex(WHITE).with_alpha(0.3),
-            (true, true) => Rgba::hex(ACCENT),
+            (true, true) => Rgba::hex(holo::accent()),
             (true, false) => Rgba::hex(WHITE),
         };
         let tw = r.measure_spaced(label, em, spacing, Weight::Medium).min(part - 8.0 * d);
@@ -97,7 +97,7 @@ pub fn draw_popup(gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, popup
     for (i, label) in labels.iter().enumerate() {
         let (rx, ry, rw, rh) = row_rect(popup, i, d);
         if pressed == Some(i) {
-            batch.rect(Rect::new(rx + 1.0 * d, ry, rw - 2.0 * d, rh), Rgba::hex(ACCENT).with_alpha(0.3), 0.0);
+            batch.rect(Rect::new(rx + 1.0 * d, ry, rw - 2.0 * d, rh), Rgba::hex(holo::accent()).with_alpha(0.3), 0.0);
         }
         if i + 1 < labels.len() {
             batch.rect(Rect::new(rx + 1.0 * d, ry + rh - 1.0 * d, rw - 2.0 * d, 1.0 * d), Rgba::hex(POPUP_LINE), 0.0);

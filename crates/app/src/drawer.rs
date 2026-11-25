@@ -17,7 +17,7 @@ use launcher_draw::{Rect, Rgba};
 
 use crate::contacts::{self, Contact};
 use crate::fonts::Weight;
-use crate::holo::{self, ACCENT, BLACK, WHITE};
+use crate::holo::{self, BLACK, WHITE};
 use crate::home::{Touch, TouchKind};
 use crate::icons::Icons;
 use crate::render::Renderer;
@@ -97,6 +97,9 @@ pub struct Drawer {
     press: LongPress,
     /// The app (index into the shown results) a long-press would pick up.
     press_at: Option<(usize, f32, f32)>,
+    /// Slide lengths times this (0: no slide).
+    speed: f32,
+    glow: bool,
     density: f32,
 }
 
@@ -124,6 +127,8 @@ impl Drawer {
             pressed: None,
             press: LongPress::new(LONG_PRESS, 12.0 * density),
             press_at: None,
+            speed: 1.0,
+            glow: true,
             density,
         }
     }
@@ -152,9 +157,15 @@ impl Drawer {
         self.slide.is_some_and(|s| now < s.start + s.dur) || self.scroller.animating(now) || self.scroller.moved()
     }
 
+    /// The owner's animation speed and scrolling-glow settings.
+    pub fn set_style(&mut self, speed: f32, glow: bool) {
+        self.speed = speed;
+        self.glow = glow;
+    }
+
     pub fn open(&mut self, now: Instant, focus: bool) {
         let from = self.progress(now);
-        self.slide = Some(Slide { from, to: 1.0, start: now, dur: OPEN });
+        self.slide = Some(Slide { from, to: 1.0, start: now, dur: OPEN.mul_f32(self.speed) });
         self.focused = focus;
         self.scroller.reset();
         self.permission = Permission::Unknown;
@@ -163,7 +174,7 @@ impl Drawer {
     /// Slide away (or vanish at once, after launching an app) and forget the search.
     pub fn close(&mut self, now: Instant, animate: bool) {
         let from = self.progress(now);
-        self.slide = animate.then_some(Slide { from, to: 0.0, start: now, dur: CLOSE });
+        self.slide = (animate && self.speed > 0.0).then_some(Slide { from, to: 0.0, start: now, dur: CLOSE.mul_f32(self.speed) });
         self.shown = 0.0;
         self.focused = false;
         self.pressed = None;
@@ -454,7 +465,7 @@ impl Drawer {
         let scroll = self.scroller.offset(now);
         let (sw, sh) = (m.screen_w, m.screen_h);
         let white = Rgba::hex(WHITE).with_alpha(fade);
-        let accent = Rgba::hex(ACCENT).with_alpha(fade);
+        let accent = Rgba::hex(holo::accent()).with_alpha(fade);
         let black = Rgba::hex(BLACK).with_alpha(fade);
 
         batch.rect(Rect::new(0.0, 0.0, sw, sh), black, 0.0);
@@ -530,6 +541,15 @@ impl Drawer {
                 }
             }
             let _ = rows_h;
+        }
+
+        // The Holo glow at whichever end of the list is being pushed past.
+        let over = self.scroller.overscroll();
+        if self.glow && over != 0.0 {
+            let strength = (over.abs() / (160.0 * d)).min(1.0);
+            let y = if over < 0.0 { m.list_top } else { m.home_bar.1 };
+            let (gx, gw) = (m.screen_w * 0.15, m.screen_w * 0.7);
+            batch.glow(Rect::new(gx, y, gw, 1.0), Rgba::hex(holo::accent()).with_alpha(0.55 * strength * fade), 0.0, 28.0 * d * (0.5 + strength));
         }
 
         // Cover whatever scrolled up behind the header and field, and down

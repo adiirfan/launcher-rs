@@ -121,6 +121,8 @@ fn android_main(app: AndroidApp) {
             }
         });
 
+        let style = home.settings();
+        drawer.set_style(style.animations.factor(), style.glow);
         let input = drain_input(&app);
         if !input.touches.is_empty() {
             policy.note_activity(Instant::now());

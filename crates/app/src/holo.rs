@@ -3,8 +3,18 @@
 use launcher_draw::batch::Batch;
 use launcher_draw::{Rect, Rgba};
 
-/// Holo blue. Becomes a setting (blue, purple, green, orange) later.
-pub const ACCENT: u32 = 0x33B5E5;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+static ACCENT: AtomicU32 = AtomicU32::new(0x33B5E5);
+
+/// The accent colour the owner picked (Holo blue unless changed).
+pub fn accent() -> u32 {
+    ACCENT.load(Ordering::Relaxed)
+}
+
+pub fn set_accent(rgb: u32) {
+    ACCENT.store(rgb, Ordering::Relaxed);
+}
 pub const WHITE: u32 = 0xFFFFFF;
 pub const BLACK: u32 = 0x000000;
 /// Search bar text and icon on Home.
