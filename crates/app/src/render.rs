@@ -162,6 +162,9 @@ pub struct Renderer {
     fonts: [Option<FontSet>; 4],
     last_log: Instant,
     redraw: bool,
+    /// Time spent this frame rasterising new glyphs and loading font weights.
+    pub spent_glyphs: Duration,
+    pub spent_fonts: Duration,
 }
 
 impl Renderer {
@@ -209,13 +212,24 @@ impl Renderer {
                 fonts: [None, Some(fonts::load_weight(Weight::Regular)), None, None],
                 last_log: Instant::now() - Duration::from_secs(60),
                 redraw: false,
+                spent_glyphs: Duration::ZERO,
+                spent_fonts: Duration::ZERO,
             }
+        }
+    }
+
+    /// Load every font weight now, so none is first loaded mid-movement.
+    pub fn load_fonts(&mut self) {
+        for w in [Weight::Light, Weight::Regular, Weight::Medium, Weight::Bold] {
+            self.font(w);
         }
     }
 
     /// Call before building each frame: empties any atlas that filled up last frame.
     pub fn begin_frame(&mut self) {
         self.redraw = false;
+        self.spent_glyphs = Duration::ZERO;
+        self.spent_fonts = Duration::ZERO;
         if let Some(slots) = self.icon_slots.as_mut() {
             slots.begin_frame();
         }
@@ -294,7 +308,12 @@ impl Renderer {
     }
 
     fn font(&mut self, weight: Weight) -> &FontSet {
-        self.fonts[weight as usize].get_or_insert_with(|| fonts::load_weight(weight))
+        if self.fonts[weight as usize].is_none() {
+            let t = Instant::now();
+            self.fonts[weight as usize] = Some(fonts::load_weight(weight));
+            self.spent_fonts += t.elapsed();
+        }
+        self.fonts[weight as usize].as_ref().expect("just loaded")
     }
 
     /// Width of one line of text, without drawing it.
@@ -347,6 +366,7 @@ impl Renderer {
             let slot = match self.glyph_keys.get(&key) {
                 Some(slot) => *slot,
                 None => {
+                    let t = Instant::now();
                     let fonts = self.fonts[weight as usize].as_ref().expect("loaded above");
                     let slot = match fonts.raster(c, px) {
                         None => Some(None),
@@ -354,6 +374,7 @@ impl Renderer {
                             Some(GlyphSlot { uv, w: g.w as f32, h: g.h as f32, left: g.left, top: g.top })
                         }),
                     };
+                    self.spent_glyphs += t.elapsed();
                     match slot {
                         Some(slot) => {
                             self.glyph_keys.insert(key, slot);

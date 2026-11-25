@@ -419,6 +419,21 @@ impl SettingsScreen {
 
     /// Build the screen's part of the frame. True while anything moves.
     #[allow(clippy::too_many_arguments)]
+    /// Draw the main page once into a throwaway batch while idle, so its
+    /// letters are ready before it first slides in (12 ms otherwise).
+    #[allow(clippy::too_many_arguments)]
+    pub fn warm(&mut self, gl: &glow::Context, r: &mut Renderer, icons: &mut Icons, home: &Home, screen: (i32, i32), insets: Insets, now: Instant) {
+        if self.is_open() {
+            return;
+        }
+        let page = std::mem::replace(&mut self.page, Page::Main);
+        self.shown = 1.0;
+        self.draw(gl, r, &mut Batch::new(), icons, home, screen, insets, now);
+        self.shown = 0.0;
+        self.page = page;
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn draw(&mut self, gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, icons: &mut Icons, home: &Home, screen: (i32, i32), insets: Insets, now: Instant) -> bool {
         let p = self.progress(now);
         if let Some(s) = self.slide

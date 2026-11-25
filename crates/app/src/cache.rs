@@ -82,9 +82,15 @@ impl Store {
         let _ = write_atomic(&self.dir.join("boot.txt"), boot.to_string().as_bytes());
     }
 
-    pub fn load_icon(&self, key: &AppKey, size: u32) -> Option<(Vec<u8>, u32, u32)> {
-        let bytes = fs::read(self.icon_path(key)).ok()?;
-        let (header, rgba) = qoi::decode_to_vec(&bytes).ok()?;
+    /// The cached icon file's bytes, still compressed. Opening a file costs
+    /// 1.5-3 ms on the XZ3, ten times the decode, so callers keep these.
+    pub fn read_icon(&self, key: &AppKey) -> Option<Vec<u8>> {
+        fs::read(self.icon_path(key)).ok()
+    }
+
+    /// Unpack bytes from `read_icon`; `None` if they're for another size.
+    pub fn decode_icon(bytes: &[u8], size: u32) -> Option<(Vec<u8>, u32, u32)> {
+        let (header, rgba) = qoi::decode_to_vec(bytes).ok()?;
         if header.width != size || header.height != size || header.channels != qoi::Channels::Rgba {
             return None;
         }
