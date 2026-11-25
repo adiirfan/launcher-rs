@@ -42,6 +42,19 @@ public class MainActivity extends NativeActivity {
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         getWindow().setFormat(PixelFormat.TRANSLUCENT); // let the wallpaper show through
+        // Bar sizes straight from Android: from Android 15 apps are drawn
+        // under the bars, so the content area no longer shows them.
+        getWindow().getDecorView().setOnApplyWindowInsetsListener((v, insets) -> {
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                android.graphics.Insets i = insets.getInsets(
+                        android.view.WindowInsets.Type.systemBars() | android.view.WindowInsets.Type.displayCutout());
+                onInsets(i.top, i.bottom, i.left, i.right);
+            } else {
+                onInsets(insets.getSystemWindowInsetTop(), insets.getSystemWindowInsetBottom(),
+                        insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetRight());
+            }
+            return v.onApplyWindowInsets(insets);
+        });
         input = new View(this) {
             @Override public boolean onCheckIsTextEditor() { return true; }
             @Override public InputConnection onCreateInputConnection(EditorInfo info) {
@@ -278,6 +291,7 @@ public class MainActivity extends NativeActivity {
     private static native void onAction();
     private static native void onHome();
     private static native void onTrim(int level);
+    private static native void onInsets(int top, int bottom, int left, int right);
     private static native void onPermission(int code, boolean granted);
     private static native void onMedia(String title, String artist, int state);
 
@@ -296,6 +310,15 @@ public class MainActivity extends NativeActivity {
         @Override public boolean finishComposingText() { return push(super.finishComposingText()); }
         @Override public boolean deleteSurroundingText(int b, int a) { return push(super.deleteSurroundingText(b, a)); }
         @Override public boolean setSelection(int s, int e) { return push(super.setSelection(s, e)); }
+        @Override public boolean setComposingRegion(int s, int e) { return push(super.setComposingRegion(s, e)); }
+        @Override public boolean deleteSurroundingTextInCodePoints(int b, int a) {
+            return push(super.deleteSurroundingTextInCodePoints(b, a));
+        }
+        @Override public boolean replaceText(int start, int end, CharSequence t, int p, TextAttribute attr) {
+            return push(super.replaceText(start, end, t, p, attr));
+        }
+        /** Keyboards group edits; whatever they did, report the result once they finish. */
+        @Override public boolean endBatchEdit() { boolean more = super.endBatchEdit(); push(true); return more; }
         @Override public boolean performEditorAction(int action) { onAction(); return true; }
         /** Some keyboards send keys instead of text: Backspace, Enter, plain letters. */
         @Override public boolean sendKeyEvent(KeyEvent k) {

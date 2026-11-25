@@ -23,16 +23,26 @@ pub fn load_weight(weight: Weight) -> FontSet {
         Weight::Bold => &["Roboto-Bold.ttf", "Roboto-Medium.ttf", "Roboto-Regular.ttf"],
     };
     let files: Vec<(&str, u32)> = first.iter().map(|&n| (n, 0)).chain(FALLBACK.iter().copied()).collect();
-    load(&files, &format!("{weight:?}"))
+    let wght = match weight {
+        Weight::Light => 300.0,
+        Weight::Regular => 400.0,
+        Weight::Medium => 500.0,
+        Weight::Bold => 700.0,
+    };
+    load(&files, &format!("{weight:?}"), wght)
 }
 
-fn load(files: &[(&str, u32)], what: &str) -> FontSet {
+/// `wght` picks the weight inside fonts that hold them all in one file
+/// (Roboto from Android 12 on); single-weight files ignore it.
+fn load(files: &[(&str, u32)], what: &str, wght: f32) -> FontSet {
     let mut fonts = Vec::new();
     let mut names = Vec::new();
     for &(name, index) in files {
         let Some(bytes) = map(name) else { continue };
         match ab_glyph::FontRef::try_from_slice_and_index(bytes, index) {
-            Ok(f) => {
+            Ok(mut f) => {
+                use ab_glyph::VariableFont;
+                f.set_variation(b"wght", wght);
                 fonts.push(f);
                 names.push(name);
             }

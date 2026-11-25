@@ -32,10 +32,9 @@ pub struct Icons {
     pub decoded: u32,
     /// An icon was left as a placeholder to keep this frame on time.
     deferred: bool,
+    /// Icon work allowed per frame; the rest waits for the next frame.
+    budget: Duration,
 }
-
-/// Icon work allowed per frame; the rest waits for the next frame.
-const FRAME_BUDGET: Duration = Duration::from_millis(3);
 
 fn atlas_key(key: &AppKey) -> String {
     format!("{}/{}", key.package, key.activity)
@@ -44,7 +43,8 @@ fn atlas_key(key: &AppKey) -> String {
 impl Icons {
     pub fn new(store: Store) -> Icons {
         Icons { store, size: 0, failed: HashSet::new(), missing: Vec::new(), stale: Vec::new(),
-            bytes: HashMap::new(), no_file: HashSet::new(), spent: Duration::ZERO, decoded: 0, deferred: false }
+            bytes: HashMap::new(), no_file: HashSet::new(), spent: Duration::ZERO, decoded: 0, deferred: false,
+            budget: Duration::from_millis(3) }
     }
 
     pub fn size(&self) -> u32 {
@@ -88,7 +88,7 @@ impl Icons {
         if self.failed.contains(key) {
             return None;
         }
-        if self.spent >= FRAME_BUDGET {
+        if self.spent >= self.budget {
             self.deferred = true;
             return None;
         }
@@ -163,6 +163,11 @@ impl Icons {
                 self.no_file.insert(key.clone());
             }
         }
+    }
+
+    /// A fifth of a refresh suits most phones: 3.3 ms at 60 Hz, 1.7 at 120.
+    pub fn set_frame_budget(&mut self, budget: Duration) {
+        self.budget = budget;
     }
 
     /// True when an icon was left as a placeholder to stay on time.
