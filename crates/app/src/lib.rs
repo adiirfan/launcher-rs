@@ -6,7 +6,10 @@ mod quad;
 
 use std::time::{Duration, Instant};
 
-use android_activity::input::{InputEvent, KeyAction, Keycode};
+use android_activity::input::{
+    ImeOptions, InputEvent, InputType, KeyAction, Keycode, MotionAction, TextInputAction,
+    TextInputState,
+};
 use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
 use glow::HasContext;
 use launcher_core::frame::FrameScheduler;
@@ -68,7 +71,25 @@ fn android_main(app: AndroidApp) {
             }
         });
 
-        drain_input(&app);
+        let input = drain_input(&app);
+        if let Some((x, y)) = input.tap {
+            log::info!("tap at {x:.0},{y:.0}");
+            if y < KEYBOARD_TAP_ZONE {
+                app.set_ime_editor_info(
+                    InputType::TYPE_CLASS_TEXT | InputType::TYPE_TEXT_VARIATION_NORMAL,
+                    TextInputAction::Search,
+                    ImeOptions::IME_FLAG_NO_FULLSCREEN,
+                );
+                app.show_soft_input(true);
+            }
+        }
+        if input.back {
+            app.hide_soft_input(true);
+        }
+        if let Some(state) = input.text {
+            on_text(&state);
+            sched.request_redraw();
+        }
 
         let now = Instant::now();
         if sched.should_draw(now) {
@@ -88,19 +109,53 @@ fn android_main(app: AndroidApp) {
     log::info!("android_main end");
 }
 
+/// Taps in this many pixels from the top open the keyboard (risk check only).
+const KEYBOARD_TAP_ZONE: f32 = 300.0;
+
+#[derive(Default)]
+struct InputOut {
+    tap: Option<(f32, f32)>,
+    back: bool,
+    text: Option<TextInputState>,
+}
+
 /// Input must always be consumed or Android reports the app as frozen.
-fn drain_input(app: &AndroidApp) {
-    let Ok(mut iter) = app.input_events_iter() else { return };
+fn drain_input(app: &AndroidApp) -> InputOut {
+    let mut out = InputOut::default();
+    let Ok(mut iter) = app.input_events_iter() else { return out };
     while iter.next(|event| match event {
         // A launcher ignores Back; letting it through would close us.
         InputEvent::KeyEvent(key) if key.key_code() == Keycode::Back => {
             if key.action() == KeyAction::Up {
                 log::info!("back ignored");
+                out.back = true;
             }
+            InputStatus::Handled
+        }
+        InputEvent::MotionEvent(m) => {
+            if m.action() == MotionAction::Up {
+                let p = m.pointer_at_index(0);
+                out.tap = Some((p.x(), p.y()));
+            }
+            InputStatus::Handled
+        }
+        InputEvent::TextEvent(state) => {
+            out.text = Some(state.clone());
             InputStatus::Handled
         }
         _ => InputStatus::Unhandled,
     }) {}
+    out
+}
+
+fn on_text(state: &TextInputState) {
+    let compose = state
+        .compose_region
+        .map_or("none".to_string(), |c| format!("{}..{}", c.start, c.end));
+    log::info!(
+        "text: {:?} sel={}..{} compose={}",
+        state.text, state.selection.start, state.selection.end, compose
+    );
 }
 
 fn draw(g: &GlSurface, q: &mut Quads) {
