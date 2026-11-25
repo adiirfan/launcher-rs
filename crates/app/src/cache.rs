@@ -10,6 +10,9 @@ use android_activity::AndroidApp;
 use launcher_core::applist::{self, AppRecord};
 use launcher_core::home::{AppKey, HomeLayout};
 
+/// Holo icons (two-layer icons cut to a rounded square).
+const ICONS: &str = "icons-holo";
+
 #[derive(Clone)]
 pub struct Store {
     /// The app's private folder; the home layout lives here.
@@ -38,14 +41,19 @@ impl Store {
     pub fn open(app: &AndroidApp) -> Store {
         let base = app.internal_data_path().unwrap_or_else(|| PathBuf::from("/data/local/tmp"));
         let dir = base.join("cache");
-        if let Err(e) = fs::create_dir_all(dir.join("icons")) {
+        if let Err(e) = fs::create_dir_all(dir.join(ICONS)) {
             log::warn!("cache folder: {e}");
+        }
+        // Icons cut by the old look; never mixed with the Holo ones.
+        if dir.join("icons").exists() {
+            let _ = fs::remove_dir_all(dir.join("icons"));
+            log::info!("cache: removed old icon folder");
         }
         Store { data: base, dir }
     }
 
     fn icon_path(&self, key: &AppKey) -> PathBuf {
-        self.dir.join("icons").join(format!("{:016x}.qoi", key_hash(key)))
+        self.dir.join(ICONS).join(format!("{:016x}.qoi", key_hash(key)))
     }
 
     pub fn load_apps(&self) -> Option<(Vec<AppRecord>, i32)> {

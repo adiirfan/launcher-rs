@@ -91,8 +91,9 @@ impl Icons {
             opacity *= 0.7;
         }
         match self.uv(gl, r, key) {
-            Some(uv) => batch.image(Rect::new(x, y, s, s), uv, s / 2.0, opacity),
-            None => batch.circle(x + s / 2.0, y + s / 2.0, s / 2.0, Rgba::hex(0x737373).with_alpha(opacity)),
+            // Shapes are cut into the pixels already; no mask here.
+            Some(uv) => batch.image(Rect::new(x, y, s, s), uv, 0.0, opacity),
+            None => batch.rect(Rect::new(x, y, s, s), Rgba::hex(0x737373).with_alpha(opacity), s * 0.18),
         }
     }
 
