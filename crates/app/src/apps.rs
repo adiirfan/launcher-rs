@@ -4,14 +4,10 @@ use android_activity::AndroidApp;
 use jni::objects::{JObject, JValue};
 use jni::{Env, jni_sig, jni_str};
 
-use crate::jni_util::with_activity;
+use launcher_core::applist::AppRecord;
+use launcher_core::home::{AppKey, HomeLayout};
 
-#[derive(Clone, Debug)]
-pub struct AppEntry {
-    pub label: String,
-    pub package: String,
-    pub activity: String,
-}
+use crate::jni_util::with_activity;
 
 /// Local refs made per app; each app gets its own frame so a long list
 /// never fills Android's local reference table.
@@ -50,7 +46,7 @@ fn java_string(env: &mut Env, obj: &JObject) -> jni::errors::Result<String> {
 }
 
 /// Every launchable activity for this user, sorted by label (case-insensitive).
-pub fn list_apps(app: &AndroidApp) -> Vec<AppEntry> {
+pub fn list_apps(app: &AndroidApp) -> Vec<AppRecord> {
     let result = with_activity(app, |env, activity| {
         let la = launcher_apps(env, activity)?;
         let user = my_user(env)?;
@@ -65,7 +61,7 @@ pub fn list_apps(app: &AndroidApp) -> Vec<AppEntry> {
         let n = env.call_method(&list, jni_str!("size"), jni_sig!("()I"), &[])?.i()?;
         let mut out = Vec::with_capacity(n as usize);
         for i in 0..n {
-            let entry = env.with_local_frame(FRAME, |env| -> jni::errors::Result<AppEntry> {
+            let entry = env.with_local_frame(FRAME, |env| -> jni::errors::Result<AppRecord> {
                 let info = env
                     .call_method(&list, jni_str!("get"), jni_sig!("(I)Ljava/lang/Object;"), &[JValue::Int(i)])?
                     .l()?;
@@ -81,10 +77,9 @@ pub fn list_apps(app: &AndroidApp) -> Vec<AppEntry> {
                 let cls = env
                     .call_method(&comp, jni_str!("getClassName"), jni_sig!("()Ljava/lang/String;"), &[])?
                     .l()?;
-                Ok(AppEntry {
+                Ok(AppRecord {
                     label: java_string(env, &label)?,
-                    package: java_string(env, &pkg)?,
-                    activity: java_string(env, &cls)?,
+                    key: AppKey { package: java_string(env, &pkg)?, activity: java_string(env, &cls)? },
                 })
             })?;
             out.push(entry);
@@ -99,7 +94,7 @@ pub fn list_apps(app: &AndroidApp) -> Vec<AppEntry> {
     apps
 }
 
-fn component<'l>(env: &mut Env<'l>, entry: &AppEntry) -> jni::errors::Result<JObject<'l>> {
+fn component<'l>(env: &mut Env<'l>, entry: &AppKey) -> jni::errors::Result<JObject<'l>> {
     let pkg = env.new_string(&entry.package)?;
     let cls = env.new_string(&entry.activity)?;
     env.new_object(
@@ -111,7 +106,7 @@ fn component<'l>(env: &mut Env<'l>, entry: &AppEntry) -> jni::errors::Result<JOb
 
 /// The app's icon drawn at `size_px` square, as premultiplied RGBA bytes.
 /// `None` if the app is gone or its icon can't be drawn.
-pub fn load_icon_rgba(app: &AndroidApp, entry: &AppEntry, size_px: i32) -> Option<(Vec<u8>, i32, i32)> {
+pub fn load_icon_rgba(app: &AndroidApp, entry: &AppKey, size_px: i32) -> Option<(Vec<u8>, i32, i32)> {
     let density = app.config().density().unwrap_or(0) as i32;
     let result = with_activity(app, |env, activity| {
         let la = launcher_apps(env, activity)?;
@@ -202,7 +197,7 @@ pub fn load_icon_rgba(app: &AndroidApp, entry: &AppEntry, size_px: i32) -> Optio
 }
 
 /// Open the app. `false` (and a log line) if Android refused, e.g. it was uninstalled.
-pub fn launch(app: &AndroidApp, entry: &AppEntry) -> bool {
+pub fn launch(app: &AndroidApp, entry: &AppKey) -> bool {
     let result = with_activity(app, |env, activity| {
         let la = launcher_apps(env, activity)?;
         let user = my_user(env)?;
@@ -222,4 +217,160 @@ pub fn launch(app: &AndroidApp, entry: &AppEntry) -> bool {
             false
         }
     }
+}
+
+fn package_manager<'l>(env: &mut Env<'l>, activity: &JObject) -> jni::errors::Result<JObject<'l>> {
+    env.call_method(activity, jni_str!("getPackageManager"), jni_sig!("()Landroid/content/pm/PackageManager;"), &[])?
+        .l()
+}
+
+/// How many times the phone has booted. Android's change counter restarts
+/// at every boot, so a saved counter is only meaningful within one boot.
+pub fn boot_count(app: &AndroidApp) -> i32 {
+    with_activity(app, |env, activity| {
+        let resolver = env
+            .call_method(activity, jni_str!("getContentResolver"), jni_sig!("()Landroid/content/ContentResolver;"), &[])?
+            .l()?;
+        let name = env.new_string("boot_count")?;
+        env.call_static_method(
+            jni_str!("android/provider/Settings$Global"),
+            jni_str!("getInt"),
+            jni_sig!("(Landroid/content/ContentResolver;Ljava/lang/String;I)I"),
+            &[JValue::Object(&resolver), JValue::Object(&name), JValue::Int(-1)],
+        )?
+        .i()
+    })
+    .unwrap_or(-1)
+}
+
+/// Android's change counter right now, with the packages installed, updated
+/// or removed since `seq`. `None` when nothing changed.
+pub fn changed_since(app: &AndroidApp, seq: i32) -> Option<(i32, Vec<String>)> {
+    let result = with_activity(app, |env, activity| {
+        let pm = package_manager(env, activity)?;
+        let changed = env
+            .call_method(&pm, jni_str!("getChangedPackages"), jni_sig!("(I)Landroid/content/pm/ChangedPackages;"), &[JValue::Int(seq)])?
+            .l()?;
+        if changed.is_null() {
+            return Ok(None);
+        }
+        let new_seq = env.call_method(&changed, jni_str!("getSequenceNumber"), jni_sig!("()I"), &[])?.i()?;
+        let names = env.call_method(&changed, jni_str!("getPackageNames"), jni_sig!("()Ljava/util/List;"), &[])?.l()?;
+        let n = env.call_method(&names, jni_str!("size"), jni_sig!("()I"), &[])?.i()?;
+        let mut out = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            let name = env.with_local_frame(4, |env| -> jni::errors::Result<String> {
+                let s = env.call_method(&names, jni_str!("get"), jni_sig!("(I)Ljava/lang/Object;"), &[JValue::Int(i)])?.l()?;
+                java_string(env, &s)
+            })?;
+            out.push(name);
+        }
+        Ok(Some((new_seq, out)))
+    });
+    result.unwrap_or_else(|e| {
+        log::warn!("changed packages: {e}");
+        None
+    })
+}
+
+/// Android's current change counter (what to save after a full listing).
+pub fn current_seq(app: &AndroidApp) -> i32 {
+    changed_since(app, 0).map(|(s, _)| s).unwrap_or(0)
+}
+
+/// The package Android would open for `intent` by default; when there's no
+/// default yet (the "open with" chooser), the first app that can handle it.
+fn default_package(env: &mut Env, pm: &JObject, intent: &JObject) -> jni::errors::Result<Option<String>> {
+    const MATCH_DEFAULT_ONLY: i32 = 0x0001_0000;
+    let info = env
+        .call_method(
+            pm,
+            jni_str!("resolveActivity"),
+            jni_sig!("(Landroid/content/Intent;I)Landroid/content/pm/ResolveInfo;"),
+            &[JValue::Object(intent), JValue::Int(MATCH_DEFAULT_ONLY)],
+        )?
+        .l()?;
+    let mut pkg = package_of(env, &info)?;
+    if pkg.as_deref().is_none_or(|p| p == "android") {
+        let list = env
+            .call_method(
+                pm,
+                jni_str!("queryIntentActivities"),
+                jni_sig!("(Landroid/content/Intent;I)Ljava/util/List;"),
+                &[JValue::Object(intent), JValue::Int(MATCH_DEFAULT_ONLY)],
+            )?
+            .l()?;
+        let n = env.call_method(&list, jni_str!("size"), jni_sig!("()I"), &[])?.i()?;
+        pkg = None;
+        if n > 0 {
+            let first = env.call_method(&list, jni_str!("get"), jni_sig!("(I)Ljava/lang/Object;"), &[JValue::Int(0)])?.l()?;
+            pkg = package_of(env, &first)?;
+        }
+    }
+    Ok(pkg)
+}
+
+fn package_of(env: &mut Env, info: &JObject) -> jni::errors::Result<Option<String>> {
+    if info.is_null() {
+        return Ok(None);
+    }
+    let ai = env
+        .get_field(info, jni_str!("activityInfo"), jni_sig!("Landroid/content/pm/ActivityInfo;"))?
+        .l()?;
+    if ai.is_null() {
+        return Ok(None);
+    }
+    let name = env.get_field(&ai, jni_str!("packageName"), jni_sig!("Ljava/lang/String;"))?.l()?;
+    Ok(Some(java_string(env, &name)?))
+}
+
+/// Phone, Messages, Browser, Camera and Settings: whatever apps the phone
+/// uses for those by default, matched to their launcher entry in `installed`.
+pub fn default_dock(app: &AndroidApp, installed: &[AppRecord]) -> [Option<AppKey>; 5] {
+    let wanted: [(&str, Option<&str>); 5] = [
+        ("android.intent.action.DIAL", None),
+        ("android.intent.action.SENDTO", Some("smsto:")),
+        ("android.intent.action.VIEW", Some("https://example.com")),
+        ("android.media.action.STILL_IMAGE_CAMERA", None),
+        ("android.settings.SETTINGS", None),
+    ];
+    let packages = with_activity(app, |env, activity| {
+        let pm = package_manager(env, activity)?;
+        let mut out: Vec<Option<String>> = Vec::new();
+        for (action, data) in wanted {
+            let pkg = env.with_local_frame(16, |env| -> jni::errors::Result<Option<String>> {
+                let action = env.new_string(action)?;
+                let intent = env.new_object(
+                    jni_str!("android/content/Intent"),
+                    jni_sig!("(Ljava/lang/String;)V"),
+                    &[JValue::Object(&action)],
+                )?;
+                if let Some(data) = data {
+                    let s = env.new_string(data)?;
+                    let uri = env
+                        .call_static_method(jni_str!("android/net/Uri"), jni_str!("parse"), jni_sig!("(Ljava/lang/String;)Landroid/net/Uri;"), &[JValue::Object(&s)])?
+                        .l()?;
+                    env.call_method(&intent, jni_str!("setData"), jni_sig!("(Landroid/net/Uri;)Landroid/content/Intent;"), &[JValue::Object(&uri)])?;
+                }
+                default_package(env, &pm, &intent)
+            });
+            // One intent failing (no camera, say) shouldn't lose the others.
+            out.push(pkg.unwrap_or(None));
+        }
+        Ok(out)
+    })
+    .unwrap_or_default();
+    let mut dock: [Option<AppKey>; 5] = Default::default();
+    for (slot, pkg) in dock.iter_mut().zip(packages) {
+        *slot = pkg.and_then(|p| installed.iter().find(|r| r.key.package == p).map(|r| r.key.clone()));
+    }
+    dock
+}
+
+/// Starts a layout for a first run: an empty first page (the clock carries
+/// it) and the phone's default apps in the dock.
+pub fn first_run_layout(app: &AndroidApp, installed: &[AppRecord]) -> HomeLayout {
+    let mut layout = HomeLayout::new(4, 5);
+    layout.dock = default_dock(app, installed);
+    layout
 }

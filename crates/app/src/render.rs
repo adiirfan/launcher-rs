@@ -10,7 +10,10 @@ use launcher_draw::font::FontSet;
 use launcher_draw::text::layout_line;
 use launcher_draw::{Rect, Rgba};
 
-const ATLAS: u32 = 1024;
+/// Icon atlas: 2048×1024 holds about 75 home-size icons, enough for two
+/// full pages plus the dock while swiping between them.
+const ICON_ATLAS: (u32, u32) = (2048, 1024);
+const GLYPH_ATLAS: (u32, u32) = (1024, 1024);
 
 const VS: &str = r#"#version 300 es
 layout(location = 0) in vec4 a_rect;
@@ -99,7 +102,7 @@ struct Atlas {
 }
 
 impl Atlas {
-    fn new(gl: &glow::Context, internal: u32, format: u32) -> Atlas {
+    fn new(gl: &glow::Context, internal: u32, format: u32, (w, h): (u32, u32)) -> Atlas {
         unsafe {
             let tex = gl.create_texture().expect("atlas texture");
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
@@ -112,10 +115,10 @@ impl Atlas {
                 gl.tex_parameter_i32(glow::TEXTURE_2D, k, v as i32);
             }
             gl.tex_image_2d(
-                glow::TEXTURE_2D, 0, internal as i32, ATLAS as i32, ATLAS as i32, 0, format,
+                glow::TEXTURE_2D, 0, internal as i32, w as i32, h as i32, 0, format,
                 glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None),
             );
-            Atlas { tex, packer: ShelfPacker::new(ATLAS, ATLAS), full: false }
+            Atlas { tex, packer: ShelfPacker::new(w, h), full: false }
         }
     }
 
@@ -136,8 +139,9 @@ impl Atlas {
                 glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(pixels)),
             );
         }
-        let s = ATLAS as f32;
-        Some([x as f32 / s, y as f32 / s, (x + w) as f32 / s, (y + h) as f32 / s])
+        let (sw, sh) = self.packer.size();
+        let (sw, sh) = (sw as f32, sh as f32);
+        Some([x as f32 / sw, y as f32 / sh, (x + w) as f32 / sw, (y + h) as f32 / sh])
     }
 }
 
@@ -193,8 +197,8 @@ impl Renderer {
                 program,
                 vao,
                 vbo,
-                icons: Atlas::new(gl, glow::RGBA8, glow::RGBA),
-                glyphs: Atlas::new(gl, glow::R8, glow::RED),
+                icons: Atlas::new(gl, glow::RGBA8, glow::RGBA, ICON_ATLAS),
+                glyphs: Atlas::new(gl, glow::R8, glow::RED, GLYPH_ATLAS),
                 icon_keys: HashMap::new(),
                 glyph_keys: HashMap::new(),
                 fonts,
@@ -225,6 +229,28 @@ impl Renderer {
     /// True when something was skipped this frame and another frame is needed.
     pub fn wants_redraw(&self) -> bool {
         self.redraw
+    }
+
+    /// Where an icon already in the atlas sits, without needing its pixels.
+    pub fn icon_uv(&self, key: &str) -> Option<[f32; 4]> {
+        self.icon_keys.get(key).copied()
+    }
+
+    /// Drop an icon whose app changed; its old pixels stay unused until the
+    /// atlas is next emptied.
+    pub fn forget_icon(&mut self, key: &str) {
+        self.icon_keys.remove(key);
+    }
+
+    /// Width of one line of text, without drawing it.
+    pub fn measure(&self, s: &str, em_px: f32, max_w: f32, bold: bool) -> f32 {
+        let fonts = if bold { &self.bold } else { &self.fonts };
+        layout_line(s, fonts.px_for_em(em_px), max_w, fonts).width
+    }
+
+    /// Height from baseline to the top of capitals-and-ascenders for `em_px`.
+    pub fn ascent(&self, em_px: f32) -> f32 {
+        self.fonts.ascent(self.fonts.px_for_em(em_px))
     }
 
     /// Put an icon in the atlas once per key; returns its uv.
