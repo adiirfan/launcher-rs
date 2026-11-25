@@ -283,6 +283,8 @@ fn android_main(app: AndroidApp) {
             || waiting_since.is_some_and(|t| now.duration_since(t) >= VSYNC_FALLBACK);
         if sched.should_draw(now) && on_beat {
             waiting_since = None;
+            // Set when this frame left something for the next one.
+            let mut again = false;
             // Ask for the next refresh now, so a long frame can't lose it.
             if let Some(v) = vsync.as_ref().filter(|_| sched.is_animating()) {
                 v.request();
@@ -345,12 +347,14 @@ fn android_main(app: AndroidApp) {
                 if moving {
                     sched.animate_until(now + ANIM_STEP);
                 }
-                if r.wants_redraw() || icons.deferred() {
-                    sched.request_redraw();
-                }
+                again = r.wants_redraw() || icons.deferred();
                 frames += 1;
             }
             sched.frame_drawn(now);
+            // After frame_drawn, which clears requests made before it.
+            if again {
+                sched.request_redraw();
+            }
             // Still moving after this frame: the next one is due next refresh.
             moving_tick = tick.filter(|_| sched.is_animating());
         }

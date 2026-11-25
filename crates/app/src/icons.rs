@@ -139,6 +139,7 @@ impl Icons {
     /// so one per call, and only while nothing moves. True if one was tried.
     pub fn load_missing(&mut self, app: &AndroidApp) -> bool {
         let Some(key) = self.missing.pop() else { return false };
+        log::info!("icon from Android ({} more waiting)", self.missing.len());
         match apps::load_icon_rgba(app, &key, self.size as i32) {
             Some((px, w, _)) => {
                 self.store.save_icon(&key, w as u32, &px);
