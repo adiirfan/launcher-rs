@@ -2,16 +2,22 @@ package dev.launcherrs.app;
 
 import android.app.NativeActivity;
 import android.content.Intent;
+import android.content.pm.LauncherApps;
 import android.content.pm.PackageManager;
+import android.content.pm.ShortcutInfo;
 import android.graphics.PixelFormat;
 import android.os.Bundle;
+import android.os.Process;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.Selection;
+import android.view.HapticFeedbackConstants;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.*;
+import java.util.ArrayList;
+import java.util.List;
 
 /** Android needs a Java class to start. All logic lives in Rust (liblauncher); this
  *  only passes events to Rust (keyboard text, Home pressed, permission answers)
@@ -67,6 +73,62 @@ public class MainActivity extends NativeActivity {
 
     @Override public void onRequestPermissionsResult(int code, String[] perms, int[] results) {
         onPermission(results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED);
+    }
+
+    /** The app's own shortcuts (from its manifest first, then the ones it
+     *  added while running), at most four, as "id\tlabel" lines. Empty when
+     *  Android won't tell us (only the default Home may ask). */
+    public String shortcuts(String pkg) {
+        try {
+            LauncherApps la = (LauncherApps) getSystemService(LAUNCHER_APPS_SERVICE);
+            if (!la.hasShortcutHostPermission()) return "";
+            LauncherApps.ShortcutQuery q = new LauncherApps.ShortcutQuery();
+            q.setPackage(pkg);
+            q.setQueryFlags(LauncherApps.ShortcutQuery.FLAG_MATCH_MANIFEST | LauncherApps.ShortcutQuery.FLAG_MATCH_DYNAMIC);
+            List<ShortcutInfo> all = la.getShortcuts(q, Process.myUserHandle());
+            if (all == null) return "";
+            List<ShortcutInfo> sorted = new ArrayList<>(all);
+            sorted.sort((a, b) -> a.isDeclaredInManifest() != b.isDeclaredInManifest()
+                    ? (a.isDeclaredInManifest() ? -1 : 1) : Integer.compare(a.getRank(), b.getRank()));
+            StringBuilder out = new StringBuilder();
+            int n = 0;
+            for (ShortcutInfo s : sorted) {
+                if (!s.isEnabled() || n == 4) continue;
+                CharSequence label = s.getShortLabel();
+                if (label == null || label.length() == 0) label = s.getLongLabel();
+                if (label == null || label.length() == 0) continue;
+                out.append(s.getId().replaceAll("[\t\n]", " ")).append('\t')
+                   .append(label.toString().replaceAll("[\t\n]", " ")).append('\n');
+                n++;
+            }
+            return out.toString();
+        } catch (RuntimeException e) {
+            return "";
+        }
+    }
+
+    public boolean startShortcut(String pkg, String id) {
+        try {
+            ((LauncherApps) getSystemService(LAUNCHER_APPS_SERVICE)).startShortcut(pkg, id, null, null, Process.myUserHandle());
+            return true;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /** The short buzz of a long-press. Uses the phone's touch-feedback
+     *  setting, so it needs no permission. */
+    public void buzz() {
+        runOnUiThread(() -> getWindow().getDecorView().performHapticFeedback(HapticFeedbackConstants.LONG_PRESS));
+    }
+
+    /** Android's own "choose a wallpaper" list. */
+    public void pickWallpaper() {
+        runOnUiThread(() -> {
+            try {
+                startActivity(Intent.createChooser(new Intent(Intent.ACTION_SET_WALLPAPER), null));
+            } catch (RuntimeException e) { /* nothing on the phone offers wallpapers */ }
+        });
     }
 
     private static native void onText(String text, int selStart, int selEnd, int compStart, int compEnd);

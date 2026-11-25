@@ -116,3 +116,23 @@ pub fn start(app: &AndroidApp, action: &str, data: Option<&str>) -> bool {
 pub fn open_own_app_details(app: &AndroidApp) -> bool {
     start(app, "android.settings.APPLICATION_DETAILS_SETTINGS", Some("package:dev.launcherrs.app"))
 }
+
+/// The short buzz when a long-press takes hold.
+pub fn buzz(app: &AndroidApp) {
+    call_activity(app, jni_str!("buzz"), "buzz");
+}
+
+/// Android's list of wallpaper pickers.
+pub fn pick_wallpaper(app: &AndroidApp) {
+    call_activity(app, jni_str!("pickWallpaper"), "pickWallpaper");
+}
+
+fn call_activity(app: &AndroidApp, method: &jni::strings::JNIStr, name: &str) {
+    let r = with_activity(app, |env, activity| {
+        env.call_method(activity, method, jni_sig!("()V"), &[])?;
+        Ok(())
+    });
+    if let Err(e) = r {
+        log::warn!("{name} failed: {e}");
+    }
+}
