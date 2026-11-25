@@ -88,3 +88,20 @@ impl Quads {
         self.draw(gl, [x, y, w, h], screen, [0.0; 4], Some(tex));
     }
 }
+
+/// Upload premultiplied RGBA pixels as a texture with smooth scaling.
+pub fn upload_rgba(gl: &glow::Context, w: i32, h: i32, pixels: &[u8]) -> glow::Texture {
+    unsafe {
+        let tex = gl.create_texture().expect("texture");
+        gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+        gl.tex_image_2d(
+            glow::TEXTURE_2D, 0, glow::RGBA as i32, w, h, 0, glow::RGBA, glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(pixels)),
+        );
+        tex
+    }
+}

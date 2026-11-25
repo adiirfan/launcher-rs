@@ -3,6 +3,8 @@
 
 mod gl_surface;
 mod quad;
+mod jni_util;
+mod apps;
 
 use std::time::{Duration, Instant};
 
@@ -15,6 +17,7 @@ use glow::HasContext;
 use launcher_core::frame::FrameScheduler;
 
 use gl_surface::GlSurface;
+use apps::AppEntry;
 use quad::Quads;
 
 const REPORT_EVERY: Duration = Duration::from_secs(5);
@@ -31,6 +34,7 @@ fn android_main(app: AndroidApp) {
     let mut sched = FrameScheduler::new();
     let mut gfx: Option<GlSurface> = None;
     let mut quads: Option<Quads> = None;
+    let mut shown: Option<Shown> = None;
     let mut frames: u32 = 0;
     let mut last_report = Instant::now();
     let mut quit = false;
@@ -74,7 +78,10 @@ fn android_main(app: AndroidApp) {
         let input = drain_input(&app);
         if let Some((x, y)) = input.tap {
             log::info!("tap at {x:.0},{y:.0}");
-            if y < KEYBOARD_TAP_ZONE {
+            if let Some(s) = shown.as_ref().filter(|s| s.contains(x, y)) {
+                let ok = apps::launch(&app, &s.entry);
+                log::info!("launch {} -> {ok}", s.entry.package);
+            } else if y < KEYBOARD_TAP_ZONE {
                 app.set_ime_editor_info(
                     InputType::TYPE_CLASS_TEXT | InputType::TYPE_TEXT_VARIATION_NORMAL,
                     TextInputAction::Search,
@@ -95,7 +102,8 @@ fn android_main(app: AndroidApp) {
         if sched.should_draw(now) {
             if let Some(g) = gfx.as_ref().filter(|g| g.has_surface()) {
                 let q = quads.get_or_insert_with(|| Quads::new(g.gl()));
-                draw(g, q);
+                let s = shown.get_or_insert_with(|| Shown::load(&app, g.gl()));
+                draw(g, q, s);
                 frames += 1;
             }
             sched.frame_drawn(now);
@@ -158,7 +166,44 @@ fn on_text(state: &TextInputState) {
     );
 }
 
-fn draw(g: &GlSurface, q: &mut Quads) {
+/// The one app shown during the risk check: its entry, icon and where it sits.
+struct Shown {
+    entry: AppEntry,
+    icon: Option<glow::Texture>,
+    rect: std::cell::Cell<[f32; 4]>,
+}
+
+impl Shown {
+    fn load(app: &AndroidApp, gl: &glow::Context) -> Shown {
+        let apps = apps::list_apps(app);
+        log::info!("apps: {}", apps.len());
+        for a in apps.iter().take(5) {
+            log::info!("  {} ({}/{})", a.label, a.package, a.activity);
+        }
+        let entry = apps.into_iter().next().unwrap_or(AppEntry {
+            label: "none".into(),
+            package: "none".into(),
+            activity: "none".into(),
+        });
+        let size = icon_px(app);
+        let icon = apps::load_icon_rgba(app, &entry, size)
+            .map(|(px, w, h)| quad::upload_rgba(gl, w, h, &px));
+        Shown { entry, icon, rect: std::cell::Cell::new([0.0; 4]) }
+    }
+
+    fn contains(&self, x: f32, y: f32) -> bool {
+        let [rx, ry, rw, rh] = self.rect.get();
+        x >= rx && x < rx + rw && y >= ry && y < ry + rh
+    }
+}
+
+/// 56dp in pixels for this screen.
+fn icon_px(app: &AndroidApp) -> i32 {
+    let dpi = app.config().density().unwrap_or(160) as i32;
+    56 * dpi / 160
+}
+
+fn draw(g: &GlSurface, q: &mut Quads, shown: &Shown) {
     let gl = g.gl();
     let (w, h) = g.size();
     unsafe {
@@ -167,9 +212,15 @@ fn draw(g: &GlSurface, q: &mut Quads) {
         gl.clear_color(0.0, 0.0, 0.0, 0.0);
         gl.clear(glow::COLOR_BUFFER_BIT);
     }
-    let side = 200.0;
+    let side = 168.0_f32.max(1.0);
     let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
-    q.solid(gl, cx - side / 2.0, cy - side / 2.0, side, side, [0.2, 0.71, 0.9, 1.0], (w, h));
+    let rect = [cx - side / 2.0, cy - side / 2.0, side, side];
+    shown.rect.set(rect);
+    match shown.icon {
+        Some(tex) => q.textured(gl, rect[0], rect[1], side, side, tex, (w, h)),
+        // Placeholder when the icon can't be loaded.
+        None => q.solid(gl, rect[0], rect[1], side, side, [0.45, 0.45, 0.45, 1.0], (w, h)),
+    }
     if let Err(e) = g.swap() {
         log::error!("swap failed: {e}");
     }
