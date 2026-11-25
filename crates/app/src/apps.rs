@@ -1,7 +1,7 @@
 //! Installed apps: list them, load an icon, launch one.
 
 use android_activity::AndroidApp;
-use jni::objects::{JObject, JValue};
+use jni::objects::{JObject, JString, JValue};
 use jni::{Env, jni_sig, jni_str};
 
 use launcher_core::applist::AppRecord;
@@ -248,6 +248,87 @@ pub fn launch(app: &AndroidApp, entry: &AppKey) -> bool {
             false
         }
     }
+}
+
+/// One of an app's own shortcuts ("New tab", "Incognito tab" for Chrome).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Shortcut {
+    pub id: String,
+    pub label: String,
+    pub package: String,
+}
+
+/// Up to four shortcuts for the app. Empty when it has none, or when
+/// Android only answers the default Home and we're not it.
+pub fn shortcuts(app: &AndroidApp, entry: &AppKey) -> Vec<Shortcut> {
+    let result = with_activity(app, |env, activity| {
+        let pkg = env.new_string(&entry.package)?;
+        let text = env
+            .call_method(activity, jni_str!("shortcuts"), jni_sig!("(Ljava/lang/String;)Ljava/lang/String;"), &[JValue::Object(&pkg)])?
+            .l()?;
+        let text = env.cast_local::<JString>(text)?;
+        Ok(String::from(text.mutf8_chars(env)?))
+    });
+    match result {
+        Ok(text) => text
+            .lines()
+            .filter_map(|l| l.split_once('\t'))
+            .map(|(id, label)| Shortcut { id: id.to_string(), label: label.to_string(), package: entry.package.clone() })
+            .collect(),
+        Err(e) => {
+            log::warn!("shortcuts failed: {} ({e})", entry.package);
+            Vec::new()
+        }
+    }
+}
+
+pub fn start_shortcut(app: &AndroidApp, s: &Shortcut) -> bool {
+    let result = with_activity(app, |env, activity| {
+        let pkg = env.new_string(&s.package)?;
+        let id = env.new_string(&s.id)?;
+        env.call_method(
+            activity,
+            jni_str!("startShortcut"),
+            jni_sig!("(Ljava/lang/String;Ljava/lang/String;)Z"),
+            &[JValue::Object(&pkg), JValue::Object(&id)],
+        )?
+        .z()
+    });
+    match result {
+        Ok(ok) => ok,
+        Err(e) => {
+            log::warn!("start shortcut failed: {} ({e})", s.package);
+            false
+        }
+    }
+}
+
+/// The app's page in Settings.
+pub fn app_info(app: &AndroidApp, entry: &AppKey) -> bool {
+    let result = with_activity(app, |env, activity| {
+        let la = launcher_apps(env, activity)?;
+        let user = my_user(env)?;
+        let comp = component(env, entry)?;
+        env.call_method(
+            &la,
+            jni_str!("startAppDetailsActivity"),
+            jni_sig!("(Landroid/content/ComponentName;Landroid/os/UserHandle;Landroid/graphics/Rect;Landroid/os/Bundle;)V"),
+            &[JValue::Object(&comp), JValue::Object(&user), JValue::Object(&JObject::null()), JValue::Object(&JObject::null())],
+        )?;
+        Ok(())
+    });
+    match result {
+        Ok(()) => true,
+        Err(e) => {
+            log::warn!("app info failed: {} ({e})", entry.package);
+            false
+        }
+    }
+}
+
+/// Android's "uninstall this app?" prompt.
+pub fn uninstall(app: &AndroidApp, entry: &AppKey) -> bool {
+    crate::system::start(app, "android.intent.action.DELETE", Some(&format!("package:{}", entry.package)))
 }
 
 fn package_manager<'l>(env: &mut Env<'l>, activity: &JObject) -> jni::errors::Result<JObject<'l>> {
