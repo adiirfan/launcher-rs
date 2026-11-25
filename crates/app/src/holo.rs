@@ -37,3 +37,13 @@ pub fn magnifier(batch: &mut Batch, cx: f32, cy: f32, d: f32, color: Rgba) {
         batch.circle(lx + o, ly + o, 1.1 * d, color);
     }
 }
+
+/// A line at any angle, drawn as a tight run of dots `width` across.
+pub fn stroke(batch: &mut Batch, (x0, y0): (f32, f32), (x1, y1): (f32, f32), width: f32, color: Rgba) {
+    let len = (x1 - x0).hypot(y1 - y0);
+    let steps = (len / (width * 0.35)).ceil().max(1.0) as usize;
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        batch.circle(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, width / 2.0, color);
+    }
+}

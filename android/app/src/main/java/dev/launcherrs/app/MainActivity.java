@@ -49,7 +49,12 @@ public class MainActivity extends NativeActivity {
         runOnUiThread(() -> {
             InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
             if (show) { input.requestFocus(); imm.showSoftInput(input, 0); }
-            else imm.hideSoftInputFromWindow(input.getWindowToken(), 0);
+            else {
+                imm.hideSoftInputFromWindow(input.getWindowToken(), 0);
+                // Let go of the text box too, or Android brings the keyboard
+                // back whenever Home comes to the front again.
+                input.clearFocus();
+            }
         });
     }
 

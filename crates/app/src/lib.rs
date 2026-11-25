@@ -15,6 +15,7 @@ mod home;
 mod icons;
 mod menu;
 mod settings_pages;
+mod settings_screen;
 mod refresh;
 mod keyboard;
 mod system;
@@ -34,6 +35,7 @@ use gl_surface::GlSurface;
 use home::{Action, Home, Touch, TouchKind};
 use icons::Icons;
 use render::Renderer;
+use settings_screen::SettingsScreen;
 
 const REPORT_EVERY: Duration = Duration::from_secs(5);
 /// How long a frame stays "animating" after the pager says it's moving.
@@ -58,6 +60,7 @@ fn android_main(app: AndroidApp) {
     let mut home = Home::load(&app, store.clone());
     let mut icons = Icons::new(store);
     let mut drawer = Drawer::new(app.config().density().unwrap_or(160) as f32 / 160.0);
+    let mut settings = SettingsScreen::new(app.config().density().unwrap_or(160) as f32 / 160.0);
     let mut first_frame = true;
     let mut last_insets: Option<Insets> = None;
     let mut needs_refresh = true;
@@ -129,14 +132,19 @@ fn android_main(app: AndroidApp) {
             sched.request_redraw();
         }
         let now = Instant::now();
+        let speed = style.animations.factor();
         for t in input.touches {
+            if settings.is_open() {
+                settings.touch(t, &mut home);
+                continue;
+            }
             if drawer.is_open() {
                 let action = drawer.touch(t, home.apps().0);
                 drawer_action(&app, &mut drawer, action, now);
                 continue;
             }
             let action = home.touch(t);
-            home_action(&app, &mut drawer, action, now);
+            home_action(&app, &mut drawer, &mut settings, speed, action, now);
         }
         if let Some((key, icon, at)) = drawer.tick(now, home.apps().0) {
             // The list steps aside at once; the same finger carries the app on Home.
@@ -150,20 +158,24 @@ fn android_main(app: AndroidApp) {
             sched.request_redraw();
         }
         if input.back {
-            if drawer.is_open() {
+            if settings.is_open() {
+                settings.back(now, speed);
+            } else if drawer.is_open() {
                 drawer_action(&app, &mut drawer, DrawerAction::Close, now);
             } else {
                 let action = home.back(now);
-                home_action(&app, &mut drawer, action, now);
+                home_action(&app, &mut drawer, &mut settings, speed, action, now);
             }
             sched.request_redraw();
         }
         if keyboard::take_home() {
-            if drawer.is_open() {
+            if settings.is_open() {
+                settings.close(now, speed);
+            } else if drawer.is_open() {
                 drawer_action(&app, &mut drawer, DrawerAction::Close, now);
             } else {
                 if home.renaming() {
-                    home_action(&app, &mut drawer, home::Action::EndRename, now);
+                    home_action(&app, &mut drawer, &mut settings, speed, home::Action::EndRename, now);
                 }
                 home.go_to_first_page(now);
             }
@@ -184,7 +196,7 @@ fn android_main(app: AndroidApp) {
                 let action = drawer.first_match(home.apps().0);
                 drawer_action(&app, &mut drawer, action, now);
             } else if home.finish_rename() {
-                home_action(&app, &mut drawer, home::Action::EndRename, now);
+                home_action(&app, &mut drawer, &mut settings, speed, home::Action::EndRename, now);
                 sched.request_redraw();
             }
         }
@@ -215,10 +227,11 @@ fn android_main(app: AndroidApp) {
                 let ins = insets(&app, screen, &mut last_insets);
                 icons.begin_frame(r);
                 let mut moving = false;
-                if !drawer.covers_home(now) {
+                if !drawer.covers_home(now) && !settings.covers_home(now) {
                     moving |= home.draw(g.gl(), r, &mut batch, &mut icons, screen, ins, now);
                 }
                 moving |= drawer.draw(g.gl(), r, &mut batch, &mut icons, home.apps(), screen, ins, now);
+                moving |= settings.draw(g.gl(), r, &mut batch, &mut icons, &home, screen, ins, now);
                 r.draw(g.gl(), &batch, screen);
                 if let Err(e) = g.swap() {
                     log::error!("swap failed: {e}");
@@ -384,7 +397,7 @@ fn on_text(state: &ImeState) {
     log::info!("text: {} chars sel={}..{} compose={}", state.text.chars().count(), state.selection.0, state.selection.1, compose);
 }
 
-fn home_action(app: &AndroidApp, drawer: &mut Drawer, action: Action, now: Instant) {
+fn home_action(app: &AndroidApp, drawer: &mut Drawer, settings: &mut SettingsScreen, speed: f32, action: Action, now: Instant) {
     match action {
         Action::None => {}
         Action::Launch(key) => {
@@ -415,7 +428,7 @@ fn home_action(app: &AndroidApp, drawer: &mut Drawer, action: Action, now: Insta
             log::info!("uninstall prompt {} -> {ok}", key.package);
         }
         Action::PickWallpaper => system::pick_wallpaper(app),
-        Action::HomeSettings => log::info!("home settings: not built yet"),
+        Action::HomeSettings => settings.open(now, speed),
         Action::StartRename => {
             keyboard::clear_text(app);
             keyboard::show(app, true);
