@@ -56,3 +56,33 @@ pub fn expand_notifications(app: &AndroidApp) {
         Err(e) => log::warn!("notifications: {e}"),
     }
 }
+
+/// Start an activity for `action` (with optional data URI). False if
+/// nothing on the phone handles it.
+pub fn start(app: &AndroidApp, action: &str, data: Option<&str>) -> bool {
+    let result = with_activity(app, |env, activity| {
+        let action = env.new_string(action)?;
+        let intent = env.new_object(jni_str!("android/content/Intent"), jni_sig!("(Ljava/lang/String;)V"), &[JValue::Object(&action)])?;
+        if let Some(data) = data {
+            let s = env.new_string(data)?;
+            let uri = env
+                .call_static_method(jni_str!("android/net/Uri"), jni_str!("parse"), jni_sig!("(Ljava/lang/String;)Landroid/net/Uri;"), &[JValue::Object(&s)])?
+                .l()?;
+            env.call_method(&intent, jni_str!("setData"), jni_sig!("(Landroid/net/Uri;)Landroid/content/Intent;"), &[JValue::Object(&uri)])?;
+        }
+        env.call_method(activity, jni_str!("startActivity"), jni_sig!("(Landroid/content/Intent;)V"), &[JValue::Object(&intent)])?;
+        Ok(())
+    });
+    match result {
+        Ok(()) => true,
+        Err(e) => {
+            log::warn!("start {action:?} failed: {e}");
+            false
+        }
+    }
+}
+
+/// This app's own page in Settings (to turn a permission back on).
+pub fn open_own_app_details(app: &AndroidApp) -> bool {
+    start(app, "android.settings.APPLICATION_DETAILS_SETTINGS", Some("package:dev.launcherrs.app"))
+}

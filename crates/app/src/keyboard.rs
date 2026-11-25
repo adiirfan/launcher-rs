@@ -13,6 +13,8 @@ use crate::jni_util::with_activity;
 
 static LATEST: Mutex<Option<ImeState>> = Mutex::new(None);
 static ACTION: Mutex<bool> = Mutex::new(false);
+static HOME: Mutex<bool> = Mutex::new(false);
+static PERMISSION: Mutex<Option<bool>> = Mutex::new(None);
 static WAKER: OnceLock<AndroidAppWaker> = OnceLock::new();
 
 /// Call once at start so keyboard events can wake the main loop.
@@ -28,6 +30,36 @@ pub fn show(app: &AndroidApp, show: bool) {
     if let Err(e) = r {
         log::warn!("showKeyboard({show}) failed: {e}");
     }
+}
+
+/// Empty the search text (the keyboard's copy too).
+pub fn clear_text(app: &AndroidApp) {
+    call_void(app, jni_str!("clearText"), "clearText");
+}
+
+/// Ask Android for the contacts permission; the answer arrives via `take_permission`.
+pub fn ask_contacts(app: &AndroidApp) {
+    call_void(app, jni_str!("askContacts"), "askContacts");
+}
+
+fn call_void(app: &AndroidApp, method: &jni::strings::JNIStr, name: &str) {
+    let r = with_activity(app, |env, activity| {
+        env.call_method(activity, method, jni_sig!("()V"), &[])?;
+        Ok(())
+    });
+    if let Err(e) = r {
+        log::warn!("{name} failed: {e}");
+    }
+}
+
+/// Whether Home was pressed while we were already Home, since the last call.
+pub fn take_home() -> bool {
+    std::mem::take(&mut *HOME.lock().unwrap())
+}
+
+/// The answer to the last permission request, once.
+pub fn take_permission() -> Option<bool> {
+    PERMISSION.lock().unwrap().take()
 }
 
 /// The newest text state since the last call.
@@ -72,5 +104,21 @@ pub extern "system" fn Java_dev_launcherrs_app_MainActivity_onAction<'l>(
     _class: JClass<'l>,
 ) {
     *ACTION.lock().unwrap() = true;
+    wake();
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_launcherrs_app_MainActivity_onHome<'l>(_env: EnvUnowned<'l>, _class: JClass<'l>) {
+    *HOME.lock().unwrap() = true;
+    wake();
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_launcherrs_app_MainActivity_onPermission<'l>(
+    _env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    granted: jni::sys::jboolean,
+) {
+    *PERMISSION.lock().unwrap() = Some(granted);
     wake();
 }

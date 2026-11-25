@@ -1,6 +1,8 @@
 package dev.launcherrs.app;
 
 import android.app.NativeActivity;
+import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.graphics.PixelFormat;
 import android.os.Bundle;
 import android.text.Editable;
@@ -12,7 +14,8 @@ import android.view.ViewGroup;
 import android.view.inputmethod.*;
 
 /** Android needs a Java class to start. All logic lives in Rust (liblauncher); this
- *  only hands keyboard text to Rust and shows or hides the keyboard when Rust asks. */
+ *  only passes events to Rust (keyboard text, Home pressed, permission answers)
+ *  and does the few things Android only allows on its UI thread. */
 public class MainActivity extends NativeActivity {
     static { System.loadLibrary("launcher"); } // so Java finds onText/onAction
     private View input;
@@ -41,8 +44,29 @@ public class MainActivity extends NativeActivity {
         });
     }
 
+    /** Empty the search text: a fresh input connection starts with no text. */
+    public void clearText() {
+        runOnUiThread(() -> {
+            ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).restartInput(input);
+            onText("", 0, 0, -1, -1);
+        });
+    }
+
+    /** Home pressed while we're already Home. */
+    @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); onHome(); }
+
+    public void askContacts() {
+        runOnUiThread(() -> requestPermissions(new String[] { android.Manifest.permission.READ_CONTACTS }, 1));
+    }
+
+    @Override public void onRequestPermissionsResult(int code, String[] perms, int[] results) {
+        onPermission(results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED);
+    }
+
     private static native void onText(String text, int selStart, int selEnd, int compStart, int compEnd);
     private static native void onAction();
+    private static native void onHome();
+    private static native void onPermission(boolean granted);
 
     private static final class Bridge extends BaseInputConnection {
         Bridge(View v) { super(v, true); }
