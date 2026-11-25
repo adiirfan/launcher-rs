@@ -190,7 +190,7 @@ fn android_main(app: AndroidApp) {
         if sched.should_draw(now) {
             if let Some(g) = gfx.as_ref().filter(|g| g.has_surface()) {
                 let r = renderer.get_or_insert_with(|| {
-                    Renderer::new(g.gl(), fonts::load_system_fonts(), fonts::load_system_fonts_bold())
+                    Renderer::new(g.gl())
                 });
                 let t0 = Instant::now();
                 r.begin_frame();

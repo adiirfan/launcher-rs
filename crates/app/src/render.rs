@@ -7,6 +7,8 @@ use glow::HasContext;
 use launcher_draw::atlas::ShelfPacker;
 use launcher_draw::batch::{Batch, Instance};
 use launcher_draw::font::FontSet;
+
+use crate::fonts::{self, Weight};
 use launcher_draw::slots::SlotPool;
 use launcher_draw::text::layout_line;
 use launcher_draw::{Rect, Rgba};
@@ -155,15 +157,15 @@ pub struct Renderer {
     /// Icon slots inside `icons`; sized by the first icon drawn.
     icon_slots: Option<SlotPool>,
     glyphs: Atlas,
-    glyph_keys: HashMap<(char, u32, bool), Option<GlyphSlot>>,
-    fonts: FontSet,
-    bold: FontSet,
+    glyph_keys: HashMap<(char, u32, Weight), Option<GlyphSlot>>,
+    /// One set per weight, loaded the first time that weight is drawn.
+    fonts: [Option<FontSet>; 4],
     last_log: Instant,
     redraw: bool,
 }
 
 impl Renderer {
-    pub fn new(gl: &glow::Context, fonts: FontSet, bold: FontSet) -> Renderer {
+    pub fn new(gl: &glow::Context) -> Renderer {
         unsafe {
             let program = gl.create_program().expect("program");
             for (kind, src) in [(glow::VERTEX_SHADER, VS), (glow::FRAGMENT_SHADER, FS)] {
@@ -203,8 +205,7 @@ impl Renderer {
                 glyphs: Atlas::new(gl, glow::R8, glow::RED, GLYPH_ATLAS),
                 icon_slots: None,
                 glyph_keys: HashMap::new(),
-                fonts,
-                bold,
+                fonts: [None, None, None, None],
                 last_log: Instant::now() - Duration::from_secs(60),
                 redraw: false,
             }
@@ -284,21 +285,38 @@ impl Renderer {
         Some(self.slot_uv((x, y), w))
     }
 
+    fn font(&mut self, weight: Weight) -> &FontSet {
+        self.fonts[weight as usize].get_or_insert_with(|| fonts::load_weight(weight))
+    }
+
     /// Width of one line of text, without drawing it.
-    pub fn measure(&self, s: &str, em_px: f32, max_w: f32, bold: bool) -> f32 {
-        let fonts = if bold { &self.bold } else { &self.fonts };
+    pub fn measure(&mut self, s: &str, em_px: f32, max_w: f32, weight: Weight) -> f32 {
+        let fonts = self.font(weight);
         layout_line(s, fonts.px_for_em(em_px), max_w, fonts).width
     }
 
+    /// Width with `spacing_px` added after every glyph but the last.
+    pub fn measure_spaced(&mut self, s: &str, em_px: f32, spacing_px: f32, weight: Weight) -> f32 {
+        let n = s.chars().count();
+        self.measure(s, em_px, f32::MAX, weight) + spacing_px * n.saturating_sub(1) as f32
+    }
+
     /// Height from baseline to the top of capitals-and-ascenders for `em_px`.
-    pub fn ascent(&self, em_px: f32) -> f32 {
-        self.fonts.ascent(self.fonts.px_for_em(em_px))
+    pub fn ascent(&mut self, em_px: f32) -> f32 {
+        let fonts = self.font(Weight::Regular);
+        fonts.ascent(fonts.px_for_em(em_px))
     }
 
     /// Lay out one line at an Android-style em size and queue its glyphs.
     /// Returns the laid-out width.
     #[allow(clippy::too_many_arguments)]
-    pub fn text(
+    pub fn text(&mut self, gl: &glow::Context, batch: &mut Batch, s: &str, x: f32, baseline: f32, em_px: f32, max_w: f32, color: Rgba, weight: Weight) -> f32 {
+        self.text_spaced(gl, batch, s, x, baseline, em_px, 0.0, max_w, color, weight)
+    }
+
+    /// As `text`, with `spacing_px` added after every glyph (letter spacing).
+    #[allow(clippy::too_many_arguments)]
+    pub fn text_spaced(
         &mut self,
         gl: &glow::Context,
         batch: &mut Batch,
@@ -306,20 +324,22 @@ impl Renderer {
         x: f32,
         baseline: f32,
         em_px: f32,
+        spacing_px: f32,
         max_w: f32,
         color: Rgba,
-        bold: bool,
+        weight: Weight,
     ) -> f32 {
-        let fonts = if bold { &self.bold } else { &self.fonts };
+        self.font(weight);
+        let fonts = self.fonts[weight as usize].as_ref().expect("loaded above");
         let px = fonts.px_for_em(em_px);
         let line = layout_line(s, px, max_w, fonts);
         let size_key = (px * 2.0).round() as u32;
-        for &(c, gx) in &line.glyphs {
-            let key = (c, size_key, bold);
+        for (n, &(c, gx)) in line.glyphs.iter().enumerate() {
+            let key = (c, size_key, weight);
             let slot = match self.glyph_keys.get(&key) {
                 Some(slot) => *slot,
                 None => {
-                    let fonts = if bold { &self.bold } else { &self.fonts };
+                    let fonts = self.fonts[weight as usize].as_ref().expect("loaded above");
                     let slot = match fonts.raster(c, px) {
                         None => Some(None),
                         Some(g) => self.glyphs.put(gl, g.w, g.h, glow::RED, &g.coverage).map(|uv| {
@@ -339,12 +359,12 @@ impl Renderer {
                 }
             };
             if let Some(g) = slot {
+                let gx = gx + n as f32 * spacing_px;
                 batch.glyph(Rect::new(x + gx + g.left, baseline + g.top, g.w, g.h), g.uv, color);
             }
         }
-        line.width
+        line.width + spacing_px * line.glyphs.len().saturating_sub(1) as f32
     }
-
 
     pub fn draw(&mut self, gl: &glow::Context, batch: &Batch, screen: (i32, i32)) {
         let items = batch.instances();

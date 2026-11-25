@@ -3,24 +3,27 @@
 use launcher_draw::font::FontSet;
 
 const DIR: &str = "/system/fonts";
-const REGULAR: &[(&str, u32)] = &[
-    ("Roboto-Regular.ttf", 0),
-    ("NotoSansCJK-Regular.ttc", 0),
-    ("DroidSansFallback.ttf", 0),
-];
-const BOLD: &[(&str, u32)] = &[
-    ("Roboto-Medium.ttf", 0),
-    ("Roboto-Regular.ttf", 0),
-    ("NotoSansCJK-Regular.ttc", 0),
-    ("DroidSansFallback.ttf", 0),
-];
-
-pub fn load_system_fonts() -> FontSet {
-    load(REGULAR, "regular")
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Weight {
+    Light = 0,
+    Regular = 1,
+    Medium = 2,
+    Bold = 3,
 }
 
-pub fn load_system_fonts_bold() -> FontSet {
-    load(BOLD, "bold")
+const FALLBACK: &[(&str, u32)] = &[("NotoSansCJK-Regular.ttc", 0), ("DroidSansFallback.ttf", 0)];
+
+/// The phone's fonts for one weight, with lighter or heavier Roboto and then
+/// the wide-coverage fonts behind it for anything missing.
+pub fn load_weight(weight: Weight) -> FontSet {
+    let first: &[&str] = match weight {
+        Weight::Light => &["Roboto-Light.ttf", "Roboto-Regular.ttf"],
+        Weight::Regular => &["Roboto-Regular.ttf"],
+        Weight::Medium => &["Roboto-Medium.ttf", "Roboto-Regular.ttf"],
+        Weight::Bold => &["Roboto-Bold.ttf", "Roboto-Medium.ttf", "Roboto-Regular.ttf"],
+    };
+    let files: Vec<(&str, u32)> = first.iter().map(|&n| (n, 0)).chain(FALLBACK.iter().copied()).collect();
+    load(&files, &format!("{weight:?}"))
 }
 
 fn load(files: &[(&str, u32)], what: &str) -> FontSet {
