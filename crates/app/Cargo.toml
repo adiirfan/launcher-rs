@@ -1,0 +1,10 @@
+[package]
+name = "launcher-app"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "launcher"
+path = "src/lib.rs"
+
+[dependencies]
