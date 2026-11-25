@@ -2,7 +2,7 @@
 #![cfg(target_os = "android")]
 
 mod gl_surface;
-mod quad;
+mod render;
 mod jni_util;
 mod apps;
 mod fonts;
@@ -14,12 +14,13 @@ use android_activity::input::{
     TextInputState,
 };
 use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
-use glow::HasContext;
 use launcher_core::frame::FrameScheduler;
 
 use gl_surface::GlSurface;
 use apps::AppEntry;
-use quad::Quads;
+use launcher_draw::batch::Batch;
+use launcher_draw::{Rect, Rgba};
+use render::Renderer;
 
 const REPORT_EVERY: Duration = Duration::from_secs(5);
 
@@ -34,7 +35,8 @@ fn android_main(app: AndroidApp) {
 
     let mut sched = FrameScheduler::new();
     let mut gfx: Option<GlSurface> = None;
-    let mut quads: Option<Quads> = None;
+    let mut renderer: Option<Renderer> = None;
+    let mut batch = Batch::new();
     let mut shown: Option<Shown> = None;
     let mut frames: u32 = 0;
     let mut last_report = Instant::now();
@@ -102,9 +104,14 @@ fn android_main(app: AndroidApp) {
         let now = Instant::now();
         if sched.should_draw(now) {
             if let Some(g) = gfx.as_ref().filter(|g| g.has_surface()) {
-                let q = quads.get_or_insert_with(|| Quads::new(g.gl()));
-                let s = shown.get_or_insert_with(|| Shown::load(&app, g.gl()));
-                draw(g, q, s);
+                let r = renderer.get_or_insert_with(|| {
+                    Renderer::new(g.gl(), fonts::load_system_fonts(), fonts::load_system_fonts_bold())
+                });
+                let s = shown.get_or_insert_with(|| Shown::load(&app));
+                draw(g, r, &mut batch, s);
+                if r.wants_redraw() {
+                    sched.request_redraw();
+                }
                 frames += 1;
             }
             sched.frame_drawn(now);
@@ -170,12 +177,12 @@ fn on_text(state: &TextInputState) {
 /// The one app shown during the risk check: its entry, icon and where it sits.
 struct Shown {
     entry: AppEntry,
-    icon: Option<glow::Texture>,
+    icon: Option<(Vec<u8>, i32, i32)>,
     rect: std::cell::Cell<[f32; 4]>,
 }
 
 impl Shown {
-    fn load(app: &AndroidApp, gl: &glow::Context) -> Shown {
+    fn load(app: &AndroidApp) -> Shown {
         let apps = apps::list_apps(app);
         log::info!("apps: {}", apps.len());
         for a in apps.iter().take(5) {
@@ -187,8 +194,7 @@ impl Shown {
             activity: "none".into(),
         });
         let size = icon_px(app);
-        let icon = apps::load_icon_rgba(app, &entry, size)
-            .map(|(px, w, h)| quad::upload_rgba(gl, w, h, &px));
+        let icon = apps::load_icon_rgba(app, &entry, size);
         Shown { entry, icon, rect: std::cell::Cell::new([0.0; 4]) }
     }
 
@@ -204,24 +210,22 @@ fn icon_px(app: &AndroidApp) -> i32 {
     56 * dpi / 160
 }
 
-fn draw(g: &GlSurface, q: &mut Quads, shown: &Shown) {
+fn draw(g: &GlSurface, r: &mut Renderer, batch: &mut Batch, shown: &Shown) {
     let gl = g.gl();
     let (w, h) = g.size();
-    unsafe {
-        gl.viewport(0, 0, w, h);
-        // Fully transparent: the phone's wallpaper shows through.
-        gl.clear_color(0.0, 0.0, 0.0, 0.0);
-        gl.clear(glow::COLOR_BUFFER_BIT);
-    }
-    let side = 168.0_f32.max(1.0);
+    r.begin_frame();
+    batch.clear();
+    let side = 168.0_f32;
     let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
-    let rect = [cx - side / 2.0, cy - side / 2.0, side, side];
-    shown.rect.set(rect);
-    match shown.icon {
-        Some(tex) => q.textured(gl, rect[0], rect[1], side, side, tex, (w, h)),
+    let rect = Rect::new(cx - side / 2.0, cy - side / 2.0, side, side);
+    shown.rect.set([rect.x, rect.y, rect.w, rect.h]);
+    let uv = shown.icon.as_ref().and_then(|(px, iw, ih)| r.icon(gl, &shown.entry.package, px, *iw as u32, *ih as u32));
+    match uv {
+        Some(uv) => batch.image(rect, uv, side / 2.0, 1.0),
         // Placeholder when the icon can't be loaded.
-        None => q.solid(gl, rect[0], rect[1], side, side, [0.45, 0.45, 0.45, 1.0], (w, h)),
+        None => batch.circle(cx, cy, side / 2.0, Rgba::hex(0x737373)),
     }
+    r.draw(gl, batch, (w, h));
     if let Err(e) = g.swap() {
         log::error!("swap failed: {e}");
     }
