@@ -25,7 +25,7 @@ mod vsync;
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use android_activity::input::{InputEvent, KeyAction, Keycode, MotionAction};
+use android_activity::input::{Axis, InputEvent, KeyAction, Keycode, MotionAction};
 use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
 use launcher_core::frame::FrameScheduler;
 use launcher_core::geometry::Insets;
@@ -568,9 +568,17 @@ fn drain_input(app: &AndroidApp) -> InputOut {
                 _ => None,
             };
             if let Some(kind) = kind {
+                let at = |ns: i64| now.checked_sub(Duration::from_nanos((mono_now - ns).max(0) as u64)).unwrap_or(now);
                 let p = m.pointer_at_index(0);
-                let age = Duration::from_nanos((mono_now - m.event_time()).max(0) as u64);
-                out.touches.push(Touch { kind, x: p.x(), y: p.y(), t: now.checked_sub(age).unwrap_or(now) });
+                // A move carries the touches Android gathered since the last
+                // one; each counts for finger speed and smooth dragging.
+                if kind == TouchKind::Move {
+                    for h in p.history() {
+                        let (x, y) = (h.axis_value(Axis::X), h.axis_value(Axis::Y));
+                        out.touches.push(Touch { kind, x, y, t: at(h.event_time()) });
+                    }
+                }
+                out.touches.push(Touch { kind, x: p.x(), y: p.y(), t: at(m.event_time()) });
             }
             InputStatus::Handled
         }

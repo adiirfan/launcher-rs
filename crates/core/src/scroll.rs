@@ -6,9 +6,44 @@ use std::time::Duration;
 
 use crate::velocity::Velocity;
 
-/// How quickly a flick slows down: it covers 63% of its run in this time.
-const TAU_MS: f32 = 325.0;
-const FLING_MIN: f32 = 0.3;
+/// The glide after a flick matches Samsung's own lists, measured on the
+/// Fold with identical swipes: it runs GLIDE_DP * speed^GLIDE_POWER dp for a
+/// release at `speed` dp per ms, along Android's usual slowing-down curve.
+/// That curve's average speed is INFLEXION times the release speed.
+const GLIDE_DP: f32 = 345.0;
+const GLIDE_POWER: f32 = 1.3;
+const INFLEXION: f32 = 0.35;
+/// Slowest and fastest flick, in dp per second.
+const FLING_MIN_DP: f32 = 50.0;
+const FLING_MAX_DP: f32 = 8000.0;
+const SAMPLES: usize = 100;
+
+/// Share of the glide covered at each 1% of its time.
+fn spline() -> &'static [f32; SAMPLES + 1] {
+    static TABLE: std::sync::OnceLock<[f32; SAMPLES + 1]> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let (p1, p2) = (0.5 * INFLEXION, 1.0 - (1.0 - INFLEXION));
+        let mut table = [1.0f32; SAMPLES + 1];
+        let mut x_min = 0.0f32;
+        for (i, slot) in table.iter_mut().take(SAMPLES).enumerate() {
+            let alpha = i as f32 / SAMPLES as f32;
+            let mut x_max = 1.0f32;
+            let (mut x, mut coef);
+            loop {
+                x = x_min + (x_max - x_min) / 2.0;
+                coef = 3.0 * x * (1.0 - x);
+                let tx = coef * ((1.0 - x) * p1 + x * p2) + x * x * x;
+                if (tx - alpha).abs() < 1e-5 {
+                    break;
+                }
+                if tx > alpha { x_max = x } else { x_min = x }
+            }
+            *slot = coef * ((1.0 - x) * 0.5 + x) + x * x * x;
+        }
+        table[0] = 0.0;
+        table
+    })
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ListGesture {
@@ -38,14 +73,17 @@ struct Drag {
 #[derive(Clone, Copy, Debug)]
 struct Fling {
     from: f32,
-    /// Offset speed, px per ms (positive = towards the end of the list).
-    v: f32,
+    /// +1 towards the end of the list, -1 towards the top.
+    dir: f32,
+    distance: f32,
+    duration_ms: f32,
     start: Instant,
 }
 
 #[derive(Debug)]
 pub struct Scroller {
     slop: f32,
+    density: f32,
     max: f32,
     pos: f32,
     drag: Option<Drag>,
@@ -54,8 +92,8 @@ pub struct Scroller {
 }
 
 impl Scroller {
-    pub fn new(slop_px: f32) -> Scroller {
-        Scroller { slop: slop_px, max: 0.0, pos: 0.0, drag: None, fling: None, velocity: Velocity::new() }
+    pub fn new(slop_px: f32, density: f32) -> Scroller {
+        Scroller { slop: slop_px, density, max: 0.0, pos: 0.0, drag: None, fling: None, velocity: Velocity::new() }
     }
 
     pub fn set_bounds(&mut self, max: f32) {
@@ -77,11 +115,27 @@ impl Scroller {
         v.clamp(0.0, self.max)
     }
 
-    fn fling_at(&self, f: &Fling, now: Instant) -> (f32, f32) {
+    /// The glide for a release at `v` px per ms, or none if too slow.
+    fn fling(&self, from: f32, v: f32, start: Instant) -> Option<Fling> {
+        let dp_s = v.abs() * 1000.0 / self.density;
+        if dp_s < FLING_MIN_DP {
+            return None;
+        }
+        let dp_ms = dp_s.min(FLING_MAX_DP) / 1000.0;
+        let distance = GLIDE_DP * dp_ms.powf(GLIDE_POWER) * self.density;
+        let duration_ms = distance / (INFLEXION * dp_ms * self.density);
+        Some(Fling { from, dir: v.signum(), distance, duration_ms, start })
+    }
+
+    /// Where the glide is at `now`, and whether it is still going.
+    fn fling_at(&self, f: &Fling, now: Instant) -> (f32, bool) {
         let t = now.saturating_duration_since(f.start).as_secs_f32() * 1000.0;
-        let decay = (-t / TAU_MS).exp();
-        let pos = f.from + f.v * TAU_MS * (1.0 - decay);
-        (self.clamp(pos), f.v.abs() * TAU_MS * decay)
+        let frac = (t / f.duration_ms).min(1.0);
+        let table = spline();
+        let i = ((SAMPLES as f32 * frac) as usize).min(SAMPLES - 1);
+        let (t_inf, t_sup) = (i as f32 / SAMPLES as f32, (i + 1) as f32 / SAMPLES as f32);
+        let share = table[i] + (frac - t_inf) / (t_sup - t_inf) * (table[i + 1] - table[i]);
+        (self.clamp(f.from + f.dir * f.distance * share), frac < 1.0)
     }
 
     pub fn offset(&self, now: Instant) -> f32 {
@@ -102,9 +156,9 @@ impl Scroller {
         if self.drag.is_some() {
             return false;
         }
-        let (pos, left) = self.fling_at(f, now);
-        let at_end = (f.v > 0.0 && pos >= self.max) || (f.v < 0.0 && pos <= 0.0);
-        left > 0.5 && !at_end
+        let (pos, going) = self.fling_at(f, now);
+        let at_end = (f.dir > 0.0 && pos >= self.max) || (f.dir < 0.0 && pos <= 0.0);
+        going && !at_end
     }
 
     pub fn touch_down(&mut self, x: f32, y: f32, t: Instant) {
@@ -117,9 +171,15 @@ impl Scroller {
     }
 
     pub fn touch_move(&mut self, x: f32, y: f32, t: Instant) {
+        if self.drag.is_some() {
+            self.velocity.add(t, x, y);
+        }
+        self.follow(x, y);
+    }
+
+    fn follow(&mut self, x: f32, y: f32) {
         let slop = self.slop;
         let Some(d) = self.drag.as_mut() else { return };
-        self.velocity.add(t, x, y);
         d.y = y;
         if d.lock == Lock::Undecided {
             let (dx, dy) = (x - d.start_x, y - d.start_y);
@@ -130,7 +190,8 @@ impl Scroller {
     }
 
     pub fn touch_up(&mut self, x: f32, y: f32, t: Instant) -> ListGesture {
-        self.touch_move(x, y, t);
+        self.follow(x, y);
+        self.velocity.lift(t);
         let Some(d) = self.drag else { return ListGesture::Scroll };
         let pos = self.offset(t);
         self.drag = None;
@@ -141,12 +202,15 @@ impl Scroller {
             Lock::Pull => ListGesture::PullDown { dy: y - d.start_y },
             Lock::Scroll => {
                 let v = -self.velocity.get().1;
-                if v.abs() > FLING_MIN {
-                    self.fling = Some(Fling { from: pos, v, start: t });
-                }
+                self.fling = self.fling(pos, v, t);
                 ListGesture::Scroll
             }
         }
+    }
+
+    /// The current glide's length in px and time in ms, for logging.
+    pub fn glide(&self) -> Option<(f32, f32)> {
+        self.fling.as_ref().map(|f| (f.distance, f.duration_ms))
     }
 
     pub fn touch_cancel(&mut self, t: Instant) {
@@ -182,7 +246,7 @@ mod tests {
     }
 
     fn list() -> Scroller {
-        let mut s = Scroller::new(24.0);
+        let mut s = Scroller::new(24.0, 3.0);
         s.set_bounds(1000.0);
         s
     }
@@ -256,11 +320,73 @@ mod tests {
         let t0 = Instant::now();
         let mut s = list();
         s.touch_down(100.0, 1500.0, t0);
-        s.touch_move(100.0, 1400.0, ms(t0, 30));
-        s.touch_move(100.0, 1300.0, ms(t0, 60));
-        s.touch_up(100.0, 1300.0, ms(t0, 64));
+        s.touch_move(100.0, 1300.0, ms(t0, 30));
+        s.touch_move(100.0, 1100.0, ms(t0, 60));
+        s.touch_up(100.0, 1100.0, ms(t0, 64));
         assert_eq!(s.offset(ms(t0, 2000)), 1000.0);
         assert!(!s.animating(ms(t0, 2000)));
+    }
+
+    /// A steady flick up at `speed` px/ms on a very long list; returns
+    /// where the finger left it and where the glide came to rest.
+    fn steady_flick(speed: f32) -> (Scroller, Instant, f32) {
+        let t0 = Instant::now();
+        let mut s = Scroller::new(24.0, 3.0);
+        s.set_bounds(100_000.0);
+        s.touch_down(100.0, 1500.0, t0);
+        for n in 1..=8u64 {
+            s.touch_move(100.0, 1500.0 - speed * 8.0 * n as f32, ms(t0, 8 * n));
+        }
+        let y = 1500.0 - speed * 64.0;
+        s.touch_up(100.0, y, ms(t0, 66));
+        (s, t0, 1500.0 - y)
+    }
+
+    fn glide(speed: f32) -> f32 {
+        let (s, t0, released) = steady_flick(speed);
+        s.offset(ms(t0, 10_000)) - released
+    }
+
+    fn near(got: f32, want: f32) -> bool {
+        (got - want).abs() <= want * 0.01
+    }
+
+    #[test]
+    fn glide_goes_as_far_as_samsung_lists() {
+        // Samsung's own lists at 480 dpi glide this far for 6000 px/s.
+        let g = glide(6.0);
+        assert!(near(g, 2548.5), "{g}");
+        let (s, t0, _) = steady_flick(6.0);
+        let (d, ms_) = s.glide().unwrap();
+        assert!(near(d, 2548.5) && near(ms_, 1213.6), "{d} {ms_}");
+        assert!(s.animating(ms(t0, 66 + 1190)));
+        assert!(!s.animating(ms(t0, 66 + 1240)));
+    }
+
+    #[test]
+    fn faster_flicks_glide_much_further() {
+        let g = glide(12.0);
+        assert!(near(g, 6275.1), "{g}");
+    }
+
+    #[test]
+    fn glide_speed_has_a_ceiling() {
+        // 8000 dp/s is Android's top fling speed: 24 px/ms at 3x.
+        let g = glide(40.0);
+        assert!(near(g, 15451.0), "{g}");
+    }
+
+    #[test]
+    fn glide_never_goes_backwards_and_starts_at_finger_speed() {
+        let (s, t0, released) = steady_flick(6.0);
+        let first = s.offset(ms(t0, 66 + 16)) - released;
+        assert!(first > 6.0 * 16.0 * 0.8 && first < 6.0 * 16.0 * 1.2, "{first}");
+        let mut last = released;
+        for n in (66..2000).step_by(8) {
+            let o = s.offset(ms(t0, n));
+            assert!(o >= last - 0.001, "{n}: {o} < {last}");
+            last = o;
+        }
     }
 
     #[test]
