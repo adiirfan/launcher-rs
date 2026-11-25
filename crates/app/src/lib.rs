@@ -2,6 +2,7 @@
 #![cfg(target_os = "android")]
 
 mod gl_surface;
+mod quad;
 
 use std::time::{Duration, Instant};
 
@@ -11,6 +12,7 @@ use glow::HasContext;
 use launcher_core::frame::FrameScheduler;
 
 use gl_surface::GlSurface;
+use quad::Quads;
 
 const REPORT_EVERY: Duration = Duration::from_secs(5);
 
@@ -25,6 +27,7 @@ fn android_main(app: AndroidApp) {
 
     let mut sched = FrameScheduler::new();
     let mut gfx: Option<GlSurface> = None;
+    let mut quads: Option<Quads> = None;
     let mut frames: u32 = 0;
     let mut last_report = Instant::now();
     let mut quit = false;
@@ -70,7 +73,8 @@ fn android_main(app: AndroidApp) {
         let now = Instant::now();
         if sched.should_draw(now) {
             if let Some(g) = gfx.as_ref().filter(|g| g.has_surface()) {
-                draw(g);
+                let q = quads.get_or_insert_with(|| Quads::new(g.gl()));
+                draw(g, q);
                 frames += 1;
             }
             sched.frame_drawn(now);
@@ -99,14 +103,18 @@ fn drain_input(app: &AndroidApp) {
     }) {}
 }
 
-fn draw(g: &GlSurface) {
+fn draw(g: &GlSurface, q: &mut Quads) {
     let gl = g.gl();
     let (w, h) = g.size();
     unsafe {
         gl.viewport(0, 0, w, h);
-        gl.clear_color(0.0, 0.0, 0.0, 1.0);
+        // Fully transparent: the phone's wallpaper shows through.
+        gl.clear_color(0.0, 0.0, 0.0, 0.0);
         gl.clear(glow::COLOR_BUFFER_BIT);
     }
+    let side = 200.0;
+    let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+    q.solid(gl, cx - side / 2.0, cy - side / 2.0, side, side, [0.2, 0.71, 0.9, 1.0], (w, h));
     if let Err(e) = g.swap() {
         log::error!("swap failed: {e}");
     }
