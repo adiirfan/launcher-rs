@@ -9,6 +9,7 @@ use launcher_core::applist::AppRecord;
 use launcher_core::drawer_geometry::{COLS, DrawerMetrics};
 use launcher_core::geometry::Insets;
 use launcher_core::home::AppKey;
+use launcher_core::longpress::{LONG_PRESS, LongPress};
 use launcher_core::scroll::{ListGesture, Scroller};
 use launcher_core::search::{self, SettingsPage};
 use launcher_draw::batch::Batch;
@@ -93,6 +94,9 @@ pub struct Drawer {
     scroller: Scroller,
     metrics: Option<(DrawerMetrics, (i32, i32), Insets, u32)>,
     pressed: Option<Target>,
+    press: LongPress,
+    /// The app (index into the shown results) a long-press would pick up.
+    press_at: Option<(usize, f32, f32)>,
     density: f32,
 }
 
@@ -118,6 +122,8 @@ impl Drawer {
             scroller: Scroller::new(8.0 * density),
             metrics: None,
             pressed: None,
+            press: LongPress::new(LONG_PRESS, 12.0 * density),
+            press_at: None,
             density,
         }
     }
@@ -341,23 +347,36 @@ impl Drawer {
         }
         match t.kind {
             TouchKind::Down => {
+                // A touch that catches a fling stops it; it never long-presses.
+                let flinging = self.scroller.animating(t.t);
                 self.pressed = self.target_at(t.x, t.y, t.t);
                 self.scroller.touch_down(t.x, t.y, t.t);
+                match self.pressed {
+                    Some(Target::App(i)) if !flinging => {
+                        self.press.down(t.x, t.y, t.t);
+                        self.press_at = Some((i, t.x, t.y));
+                    }
+                    _ => self.press.cancel(),
+                }
                 DrawerAction::None
             }
             TouchKind::Move => {
                 self.scroller.touch_move(t.x, t.y, t.t);
+                self.press.moved(t.x, t.y);
                 if self.scroller.moved() {
                     self.pressed = None;
+                    self.press.cancel();
                 }
                 DrawerAction::None
             }
             TouchKind::Cancel => {
+                self.press.cancel();
                 self.scroller.touch_cancel(t.t);
                 self.pressed = None;
                 DrawerAction::None
             }
             TouchKind::Up => {
+                self.press.up();
                 let pressed = self.pressed.take();
                 match self.scroller.touch_up(t.x, t.y, t.t) {
                     ListGesture::PullDown { dy } if dy > PULL_CLOSE_DP * self.density => DrawerAction::Close,
@@ -368,6 +387,25 @@ impl Drawer {
                 }
             }
         }
+    }
+
+    /// A long-press on an app taking hold: the app, its icon's place on
+    /// screen, and where the finger is.
+    pub fn tick(&mut self, now: Instant, apps: &[AppRecord]) -> Option<(AppKey, (f32, f32, f32, f32), (f32, f32))> {
+        if !self.press.fire(now) {
+            return None;
+        }
+        let (i, x, y) = self.press_at.take()?;
+        let (m, ..) = self.metrics?;
+        let key = apps.get(*self.results.get(i)?)?.key.clone();
+        let rect = m.icon_rect(i, self.scroller.offset(now));
+        self.scroller.touch_cancel(now);
+        self.pressed = None;
+        Some((key, rect, (x, y)))
+    }
+
+    pub fn next_wake(&self, now: Instant) -> Option<Duration> {
+        self.press.next_wake(now)
     }
 
     fn tap(&mut self, target: Target, apps: &[AppRecord]) -> DrawerAction {

@@ -8,10 +8,12 @@ mod apps;
 mod cache;
 mod contacts;
 mod drawer;
+mod folder;
 mod fonts;
 mod holo;
 mod home;
 mod icons;
+mod menu;
 mod settings_pages;
 mod refresh;
 mod keyboard;
@@ -75,7 +77,7 @@ fn android_main(app: AndroidApp) {
         if visible {
             timeout = timeout.min(until_next_minute());
         }
-        let timeout = [sched.next_wake(now), policy.next_check(now)]
+        let timeout = [sched.next_wake(now), policy.next_check(now), home.next_wake(now), drawer.next_wake(now)]
             .into_iter()
             .flatten()
             .fold(timeout, Duration::min);
@@ -131,33 +133,36 @@ fn android_main(app: AndroidApp) {
                 drawer_action(&app, &mut drawer, action, now);
                 continue;
             }
-            match home.touch(t) {
-                Action::None => {}
-                Action::Launch(key) => {
-                    let ok = apps::launch(&app, &key);
-                    log::info!("launch {} -> {ok}", key.package);
-                }
-                Action::OpenNotifications => system::expand_notifications(&app),
-                Action::OpenAppList => {
-                    // Start from an empty box, whatever the keyboard last held.
-                    keyboard::clear_text(&app);
-                    drawer.open(now, false);
-                }
-                Action::OpenSearch => {
-                    keyboard::clear_text(&app);
-                    drawer.open(now, true);
-                    keyboard::show(&app, true);
-                }
-            }
+            let action = home.touch(t);
+            home_action(&app, &mut drawer, action, now);
         }
-        if input.back && drawer.is_open() {
-            drawer_action(&app, &mut drawer, DrawerAction::Close, now);
+        if let Some((key, icon, at)) = drawer.tick(now, home.apps().0) {
+            // The list steps aside at once; the same finger carries the app on Home.
+            drawer.close(now, false);
+            keyboard::show(&app, false);
+            keyboard::clear_text(&app);
+            home.lift_from_list(&app, key, icon, at);
+            sched.request_redraw();
+        }
+        if home.tick(&app, now) {
+            sched.request_redraw();
+        }
+        if input.back {
+            if drawer.is_open() {
+                drawer_action(&app, &mut drawer, DrawerAction::Close, now);
+            } else {
+                let action = home.back(now);
+                home_action(&app, &mut drawer, action, now);
+            }
             sched.request_redraw();
         }
         if keyboard::take_home() {
             if drawer.is_open() {
                 drawer_action(&app, &mut drawer, DrawerAction::Close, now);
             } else {
+                if home.renaming() {
+                    home_action(&app, &mut drawer, home::Action::EndRename, now);
+                }
                 home.go_to_first_page(now);
             }
             sched.request_redraw();
@@ -167,11 +172,19 @@ fn android_main(app: AndroidApp) {
             if drawer.is_open() {
                 drawer.set_query(&state.text);
                 sched.request_redraw();
+            } else if home.renaming() {
+                home.set_rename_text(&state.text);
+                sched.request_redraw();
             }
         }
-        if keyboard::take_action() && drawer.is_open() {
-            let action = drawer.first_match(home.apps().0);
-            drawer_action(&app, &mut drawer, action, now);
+        if keyboard::take_action() {
+            if drawer.is_open() {
+                let action = drawer.first_match(home.apps().0);
+                drawer_action(&app, &mut drawer, action, now);
+            } else if home.finish_rename() {
+                home_action(&app, &mut drawer, home::Action::EndRename, now);
+                sched.request_redraw();
+            }
         }
         if let Some(granted) = keyboard::take_permission() {
             log::info!("contacts permission: {granted}");
@@ -367,6 +380,49 @@ fn drain_input(app: &AndroidApp) -> InputOut {
 fn on_text(state: &ImeState) {
     let compose = state.compose.map_or("none".to_string(), |c| format!("{}..{}", c.0, c.1));
     log::info!("text: {} chars sel={}..{} compose={}", state.text.chars().count(), state.selection.0, state.selection.1, compose);
+}
+
+fn home_action(app: &AndroidApp, drawer: &mut Drawer, action: Action, now: Instant) {
+    match action {
+        Action::None => {}
+        Action::Launch(key) => {
+            let ok = apps::launch(app, &key);
+            log::info!("launch {} -> {ok}", key.package);
+        }
+        Action::OpenNotifications => system::expand_notifications(app),
+        Action::OpenAppList => {
+            // Start from an empty box, whatever the keyboard last held.
+            keyboard::clear_text(app);
+            drawer.open(now, false);
+        }
+        Action::OpenSearch => {
+            keyboard::clear_text(app);
+            drawer.open(now, true);
+            keyboard::show(app, true);
+        }
+        Action::StartShortcut(s) => {
+            let ok = apps::start_shortcut(app, &s);
+            log::info!("shortcut of {} -> {ok}", s.package);
+        }
+        Action::AppInfo(key) => {
+            let ok = apps::app_info(app, &key);
+            log::info!("app info {} -> {ok}", key.package);
+        }
+        Action::Uninstall(key) => {
+            let ok = apps::uninstall(app, &key);
+            log::info!("uninstall prompt {} -> {ok}", key.package);
+        }
+        Action::PickWallpaper => system::pick_wallpaper(app),
+        Action::HomeSettings => log::info!("home settings: not built yet"),
+        Action::StartRename => {
+            keyboard::clear_text(app);
+            keyboard::show(app, true);
+        }
+        Action::EndRename => {
+            keyboard::show(app, false);
+            keyboard::clear_text(app);
+        }
+    }
 }
 
 fn drawer_action(app: &AndroidApp, drawer: &mut Drawer, action: DrawerAction, now: Instant) {
