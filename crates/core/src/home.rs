@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use crate::geometry::DOCK_SLOTS;
+use crate::geometry::{ALL_APPS_SLOT, DOCK_SLOTS};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AppKey {
@@ -69,6 +69,66 @@ impl HomeLayout {
             changed = true;
         }
         changed
+    }
+
+    /// Change the grid size without losing an app; see the tests.
+    ///
+    /// Apps that still fit keep their place. The rest move, in order, to the
+    /// first free slot on their own page or a later one (adding pages). An
+    /// app in the dock's middle slot (the all-apps button) moves to a free
+    /// dock slot, else to the first free grid slot.
+    pub fn reflow(&mut self, cols: u32, rows: u32) -> bool {
+        let mut changed = false;
+        if (cols, rows) != (self.cols, self.rows) {
+            let old_cols = self.cols;
+            let old = std::mem::take(&mut self.pages);
+            self.cols = cols;
+            self.rows = rows;
+            let mut overflow: Vec<(usize, AppKey)> = Vec::new();
+            for (p, page) in old.into_iter().enumerate() {
+                self.pages.push(Self::empty_page(cols, rows));
+                for (i, app) in page.into_iter().enumerate() {
+                    let Some(app) = app else { continue };
+                    let (c, r) = (i as u32 % old_cols, i as u32 / old_cols);
+                    if c < cols && r < rows {
+                        let at = self.index(c, r);
+                        self.pages[p][at] = Some(app);
+                    } else {
+                        overflow.push((p, app));
+                    }
+                }
+            }
+            if self.pages.is_empty() {
+                self.pages.push(Self::empty_page(cols, rows));
+            }
+            for (from, app) in overflow {
+                self.put_in_first_free(from, app);
+            }
+            changed = true;
+        }
+        let mid = ALL_APPS_SLOT as usize;
+        if let Some(app) = self.dock[mid].take() {
+            match (0..self.dock.len()).find(|&i| i != mid && self.dock[i].is_none()) {
+                Some(free) => self.dock[free] = Some(app),
+                None => self.put_in_first_free(0, app),
+            }
+            changed = true;
+        }
+        changed
+    }
+
+    fn put_in_first_free(&mut self, from_page: usize, app: AppKey) {
+        let mut p = from_page;
+        loop {
+            while self.pages.len() <= p {
+                self.pages.push(Self::empty_page(self.cols, self.rows));
+            }
+            if let Some(i) = self.pages[p].iter().position(|s| s.is_none()) {
+                self.pages[p][i] = Some(app);
+                return;
+            }
+            p += 1;
+        }
     }
 
     pub fn to_text(&self) -> String {
@@ -152,6 +212,68 @@ mod tests {
         l.dock[0] = Some(k("com.dial"));
         l.dock[4] = Some(k("com.settings"));
         l
+    }
+
+    fn all_apps(l: &HomeLayout) -> Vec<AppKey> {
+        let mut v: Vec<AppKey> = l.pages.iter().flatten().chain(l.dock.iter()).flatten().cloned().collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn reflow_to_fewer_rows_keeps_every_app() {
+        let mut l = HomeLayout::new(4, 5);
+        l.place(0, 0, 0, k("keep"));
+        l.place(0, 1, 4, k("row4a"));
+        l.place(0, 3, 4, k("row4b"));
+        for i in 0..20 {
+            l.place(1, i % 4, i / 4, k(&format!("p1-{i}")));
+        }
+        let before = all_apps(&l);
+        assert!(l.reflow(4, 4));
+        assert_eq!((l.cols, l.rows), (4, 4));
+        assert!(l.pages.iter().all(|p| p.len() == 16));
+        assert_eq!(all_apps(&l), before);
+        assert_eq!(l.slot(0, 0, 0), Some(&k("keep")));
+        // The two dropped apps take the first free slots on page 0.
+        assert_eq!(l.slot(0, 1, 0), Some(&k("row4a")));
+        assert_eq!(l.slot(0, 2, 0), Some(&k("row4b")));
+        // Page 1's last row overflows onto a new page.
+        assert_eq!(l.pages.len(), 3);
+        assert_eq!(l.slot(1, 3, 3), Some(&k("p1-15")));
+        assert!(!l.reflow(4, 4));
+    }
+
+    #[test]
+    fn reflow_moves_an_app_out_of_the_all_apps_slot() {
+        let mut l = HomeLayout::new(4, 4);
+        l.dock[2] = Some(k("mid"));
+        assert!(l.reflow(4, 4));
+        assert_eq!(l.dock[2], None);
+        assert_eq!(l.dock[0], Some(k("mid")));
+    }
+
+    #[test]
+    fn reflow_finds_a_free_dock_slot_after_the_middle() {
+        let mut l = HomeLayout::new(4, 4);
+        l.dock[0] = Some(k("a"));
+        l.dock[1] = Some(k("b"));
+        l.dock[2] = Some(k("mid"));
+        assert!(l.reflow(4, 4));
+        assert_eq!(l.dock[3], Some(k("mid")));
+    }
+
+    #[test]
+    fn reflow_puts_the_middle_app_on_the_grid_when_the_dock_is_full() {
+        let mut l = HomeLayout::new(4, 4);
+        for i in 0..5 {
+            l.dock[i] = Some(k(&format!("d{i}")));
+        }
+        let before = all_apps(&l);
+        assert!(l.reflow(4, 4));
+        assert_eq!(l.dock[2], None);
+        assert_eq!(l.slot(0, 0, 0), Some(&k("d2")));
+        assert_eq!(all_apps(&l), before);
     }
 
     #[test]
