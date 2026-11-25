@@ -1,6 +1,8 @@
 package dev.launcherrs.app;
 
 import android.app.NativeActivity;
+import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.graphics.PixelFormat;
 import android.os.Bundle;
 import android.text.Editable;
@@ -12,10 +14,14 @@ import android.view.ViewGroup;
 import android.view.inputmethod.*;
 
 /** Android needs a Java class to start. All logic lives in Rust (liblauncher); this
- *  only hands keyboard text to Rust and shows or hides the keyboard when Rust asks. */
+ *  only passes events to Rust (keyboard text, Home pressed, permission answers)
+ *  and does the few things Android only allows on its UI thread. */
 public class MainActivity extends NativeActivity {
     static { System.loadLibrary("launcher"); } // so Java finds onText/onAction
     private View input;
+    /** The search text. Kept here so it survives the keyboard reconnecting
+     *  (after a dialog or the notification shade takes focus). */
+    private final Editable text = Editable.Factory.getInstance().newEditable("");
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -25,7 +31,7 @@ public class MainActivity extends NativeActivity {
             @Override public InputConnection onCreateInputConnection(EditorInfo info) {
                 info.inputType = InputType.TYPE_CLASS_TEXT;
                 info.imeOptions = EditorInfo.IME_ACTION_SEARCH | EditorInfo.IME_FLAG_NO_FULLSCREEN;
-                return new Bridge(this);
+                return new Bridge(this, text);
             }
         };
         input.setFocusableInTouchMode(true);
@@ -41,11 +47,37 @@ public class MainActivity extends NativeActivity {
         });
     }
 
+    /** Empty the search text, and tell the keyboard to start over. */
+    public void clearText() {
+        runOnUiThread(() -> {
+            BaseInputConnection.removeComposingSpans(text);
+            text.clear();
+            Selection.setSelection(text, 0);
+            ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).restartInput(input);
+            onText("", 0, 0, -1, -1);
+        });
+    }
+
+    /** Home pressed while we're already Home. */
+    @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); onHome(); }
+
+    public void askContacts() {
+        runOnUiThread(() -> requestPermissions(new String[] { android.Manifest.permission.READ_CONTACTS }, 1));
+    }
+
+    @Override public void onRequestPermissionsResult(int code, String[] perms, int[] results) {
+        onPermission(results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED);
+    }
+
     private static native void onText(String text, int selStart, int selEnd, int compStart, int compEnd);
     private static native void onAction();
+    private static native void onHome();
+    private static native void onPermission(boolean granted);
 
     private static final class Bridge extends BaseInputConnection {
-        Bridge(View v) { super(v, true); }
+        private final Editable text;
+        Bridge(View v, Editable text) { super(v, true); this.text = text; }
+        @Override public Editable getEditable() { return text; }
         private boolean push(boolean r) {
             Editable e = getEditable();
             onText(e.toString(), Selection.getSelectionStart(e), Selection.getSelectionEnd(e),

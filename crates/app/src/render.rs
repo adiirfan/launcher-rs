@@ -7,6 +7,7 @@ use glow::HasContext;
 use launcher_draw::atlas::ShelfPacker;
 use launcher_draw::batch::{Batch, Instance};
 use launcher_draw::font::FontSet;
+use launcher_draw::slots::SlotPool;
 use launcher_draw::text::layout_line;
 use launcher_draw::{Rect, Rgba};
 
@@ -151,8 +152,9 @@ pub struct Renderer {
     vbo: glow::Buffer,
     u_screen: Option<glow::UniformLocation>,
     icons: Atlas,
+    /// Icon slots inside `icons`; sized by the first icon drawn.
+    icon_slots: Option<SlotPool>,
     glyphs: Atlas,
-    icon_keys: HashMap<String, [f32; 4]>,
     glyph_keys: HashMap<(char, u32, bool), Option<GlyphSlot>>,
     fonts: FontSet,
     bold: FontSet,
@@ -199,7 +201,7 @@ impl Renderer {
                 vbo,
                 icons: Atlas::new(gl, glow::RGBA8, glow::RGBA, ICON_ATLAS),
                 glyphs: Atlas::new(gl, glow::R8, glow::RED, GLYPH_ATLAS),
-                icon_keys: HashMap::new(),
+                icon_slots: None,
                 glyph_keys: HashMap::new(),
                 fonts,
                 bold,
@@ -212,11 +214,8 @@ impl Renderer {
     /// Call before building each frame: empties any atlas that filled up last frame.
     pub fn begin_frame(&mut self) {
         self.redraw = false;
-        if self.icons.full {
-            log::info!("icon atlas full, reset");
-            self.icons.packer.reset();
-            self.icons.full = false;
-            self.icon_keys.clear();
+        if let Some(slots) = self.icon_slots.as_mut() {
+            slots.begin_frame();
         }
         if self.glyphs.full {
             log::info!("glyph atlas full, reset");
@@ -231,15 +230,58 @@ impl Renderer {
         self.redraw
     }
 
-    /// Where an icon already in the atlas sits, without needing its pixels.
-    pub fn icon_uv(&self, key: &str) -> Option<[f32; 4]> {
-        self.icon_keys.get(key).copied()
+    fn slot_uv(&self, (x, y): (u32, u32), size: u32) -> [f32; 4] {
+        let (sw, sh) = ICON_ATLAS;
+        let (sw, sh) = (sw as f32, sh as f32);
+        [x as f32 / sw, y as f32 / sh, (x + size) as f32 / sw, (y + size) as f32 / sh]
     }
 
-    /// Drop an icon whose app changed; its old pixels stay unused until the
-    /// atlas is next emptied.
+    /// Where an icon already in the atlas sits, without needing its pixels.
+    pub fn icon_uv(&mut self, key: &str) -> Option<[f32; 4]> {
+        let slots = self.icon_slots.as_mut()?;
+        let size = slots.slot_size();
+        let at = slots.get(key)?;
+        Some(self.slot_uv(at, size))
+    }
+
+    /// Drop an icon whose app changed.
     pub fn forget_icon(&mut self, key: &str) {
-        self.icon_keys.remove(key);
+        if let Some(slots) = self.icon_slots.as_mut() {
+            slots.forget(key);
+        }
+    }
+
+    /// Put a square icon in a slot (reusing the slot drawn longest ago when
+    /// all are taken); returns its uv. `None` when every slot is already
+    /// drawn this frame.
+    pub fn icon(&mut self, gl: &glow::Context, key: &str, rgba: &[u8], w: u32, h: u32) -> Option<[f32; 4]> {
+        if w != h || rgba.len() != (w * h * 4) as usize {
+            log::warn!("icon {key}: not a square RGBA image ({w}x{h})");
+            return None;
+        }
+        if self.icon_slots.as_ref().is_none_or(|p| p.slot_size() != w) {
+            let pool = SlotPool::new(ICON_ATLAS.0, ICON_ATLAS.1, w);
+            log::info!("icon slots: {} of {w}px", pool.capacity());
+            self.icon_slots = Some(pool);
+        }
+        let slots = self.icon_slots.as_mut()?;
+        if let Some(at) = slots.get(key) {
+            return Some(self.slot_uv(at, w));
+        }
+        // Every slot is already drawn this frame. Another frame wouldn't
+        // help, so draw a placeholder rather than asking for one.
+        let Some((x, y)) = slots.insert(key) else {
+            return None;
+        };
+        unsafe {
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.icons.tex));
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            gl.tex_sub_image_2d(
+                glow::TEXTURE_2D, 0, x as i32, y as i32, w as i32, h as i32, glow::RGBA,
+                glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(rgba)),
+            );
+        }
+        Some(self.slot_uv((x, y), w))
     }
 
     /// Width of one line of text, without drawing it.
@@ -251,23 +293,6 @@ impl Renderer {
     /// Height from baseline to the top of capitals-and-ascenders for `em_px`.
     pub fn ascent(&self, em_px: f32) -> f32 {
         self.fonts.ascent(self.fonts.px_for_em(em_px))
-    }
-
-    /// Put an icon in the atlas once per key; returns its uv.
-    pub fn icon(&mut self, gl: &glow::Context, key: &str, rgba: &[u8], w: u32, h: u32) -> Option<[f32; 4]> {
-        if let Some(uv) = self.icon_keys.get(key) {
-            return Some(*uv);
-        }
-        match self.icons.put(gl, w, h, glow::RGBA, rgba) {
-            Some(uv) => {
-                self.icon_keys.insert(key.to_string(), uv);
-                Some(uv)
-            }
-            None => {
-                self.redraw = true;
-                None
-            }
-        }
     }
 
     /// Lay out one line at an Android-style em size and queue its glyphs.
