@@ -5,25 +5,30 @@ mod gl_surface;
 mod render;
 mod jni_util;
 mod apps;
+mod cache;
 mod fonts;
+mod home;
 mod refresh;
 mod keyboard;
+mod system;
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use android_activity::input::{InputEvent, KeyAction, Keycode, MotionAction};
-use launcher_core::ime::ImeState;
 use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
 use launcher_core::frame::FrameScheduler;
+use launcher_core::geometry::Insets;
+use launcher_core::ime::ImeState;
 use launcher_core::refresh::{RateVote, RefreshPolicy};
+use launcher_draw::batch::Batch;
 
 use gl_surface::GlSurface;
-use apps::AppEntry;
-use launcher_draw::batch::Batch;
-use launcher_draw::{Rect, Rgba};
+use home::{Action, Home, Touch, TouchKind};
 use render::Renderer;
 
 const REPORT_EVERY: Duration = Duration::from_secs(5);
+/// How long a frame stays "animating" after the pager says it's moving.
+const ANIM_STEP: Duration = Duration::from_millis(20);
 
 #[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {
@@ -32,7 +37,7 @@ fn android_main(app: AndroidApp) {
             .with_max_level(log::LevelFilter::Info)
             .with_tag("launcher"),
     );
-    log::info!("android_main start");
+    log::info!("android_main start, {:.0} ms after process start", ms_since_process_start());
     return_freed_memory_quickly();
     keyboard::init(&app);
 
@@ -40,7 +45,11 @@ fn android_main(app: AndroidApp) {
     let mut gfx: Option<GlSurface> = None;
     let mut renderer: Option<Renderer> = None;
     let mut batch = Batch::new();
-    let mut scene: Option<Scene> = None;
+    let mut home = Home::load(&app);
+    let mut first_frame = true;
+    let mut needs_refresh = true;
+    let mut visible = true;
+    let mut minute = current_minute();
     let mut timings: Vec<Duration> = Vec::new();
     let mut frames: u32 = 0;
     let mut last_report = Instant::now();
@@ -51,11 +60,14 @@ fn android_main(app: AndroidApp) {
 
     while !quit {
         let now = Instant::now();
-        let to_report = REPORT_EVERY.saturating_sub(now.duration_since(last_report));
+        let mut timeout = REPORT_EVERY.saturating_sub(now.duration_since(last_report));
+        if visible {
+            timeout = timeout.min(until_next_minute());
+        }
         let timeout = [sched.next_wake(now), policy.next_check(now)]
             .into_iter()
             .flatten()
-            .fold(to_report, Duration::min);
+            .fold(timeout, Duration::min);
 
         app.poll_events(Some(timeout), |event| {
             if let PollEvent::Main(main) = event {
@@ -79,11 +91,16 @@ fn android_main(app: AndroidApp) {
                             g.suspend();
                         }
                     }
+                    MainEvent::Resume { .. } => {
+                        visible = true;
+                        needs_refresh = true;
+                        sched.request_redraw();
+                    }
+                    MainEvent::Pause => visible = false,
                     MainEvent::WindowResized { .. }
                     | MainEvent::RedrawNeeded { .. }
                     | MainEvent::ContentRectChanged { .. }
-                    | MainEvent::ConfigChanged { .. }
-                    | MainEvent::Resume { .. } => sched.request_redraw(),
+                    | MainEvent::ConfigChanged { .. } => sched.request_redraw(),
                     MainEvent::Destroy => quit = true,
                     _ => {}
                 }
@@ -91,19 +108,20 @@ fn android_main(app: AndroidApp) {
         });
 
         let input = drain_input(&app);
-        if input.touched {
+        if !input.touches.is_empty() {
             policy.note_activity(Instant::now());
+            sched.request_redraw();
         }
-        if let Some((x, y)) = input.tap {
-            log::info!("tap at {x:.0},{y:.0}");
-            if let Some(entry) = scene.as_ref().and_then(|s| s.hit(x, y)) {
-                let ok = apps::launch(&app, entry);
-                log::info!("launch {} -> {ok}", entry.package);
-            } else if y > KEYBOARD_TAP_ZONE {
-                // Empty space: force a redraw (used to time frames).
-                sched.request_redraw();
-            } else {
-                keyboard::show(&app, true);
+        for t in input.touches {
+            match home.touch(t) {
+                Action::None => {}
+                Action::Launch(key) => {
+                    let ok = apps::launch(&app, &key);
+                    log::info!("launch {} -> {ok}", key.package);
+                }
+                Action::OpenNotifications => system::expand_notifications(&app),
+                Action::OpenAppList => log::info!("open app list (plan 4)"),
+                Action::OpenSearch => log::info!("open search (plan 4)"),
             }
         }
         if input.back {
@@ -111,10 +129,17 @@ fn android_main(app: AndroidApp) {
         }
         if let Some(state) = keyboard::take() {
             on_text(&state);
-            sched.request_redraw();
         }
         if keyboard::take_action() {
             log::info!("action");
+        }
+
+        let m = current_minute();
+        if m != minute {
+            minute = m;
+            if home.update_date(&app) {
+                sched.request_redraw();
+            }
         }
 
         let now = Instant::now();
@@ -123,10 +148,15 @@ fn android_main(app: AndroidApp) {
                 let r = renderer.get_or_insert_with(|| {
                     Renderer::new(g.gl(), fonts::load_system_fonts(), fonts::load_system_fonts_bold())
                 });
-                let first = scene.is_none();
-                let s = scene.get_or_insert_with(|| Scene::load(&app));
                 let t0 = Instant::now();
-                draw(g, r, &mut batch, s);
+                r.begin_frame();
+                batch.clear();
+                let screen = g.size();
+                let moving = home.draw(g.gl(), r, &mut batch, screen, insets(&app, screen), now);
+                r.draw(g.gl(), &batch, screen);
+                if let Err(e) = g.swap() {
+                    log::error!("swap failed: {e}");
+                }
                 timings.push(t0.elapsed());
                 if timings.len() == 10 {
                     let worst = timings.iter().max().unwrap();
@@ -135,8 +165,13 @@ fn android_main(app: AndroidApp) {
                         avg.as_secs_f64() * 1e3, worst.as_secs_f64() * 1e3);
                     timings.clear();
                 }
-                if first {
+                if first_frame {
+                    first_frame = false;
+                    log::info!("first frame: {:.0} ms after process start", ms_since_process_start());
                     purge_freed_memory();
+                }
+                if moving {
+                    sched.animate_until(now + ANIM_STEP);
                 }
                 if r.wants_redraw() {
                     sched.request_redraw();
@@ -145,6 +180,23 @@ fn android_main(app: AndroidApp) {
             }
             sched.frame_drawn(now);
         }
+
+        // Slow work goes after a frame is on screen, never before.
+        if !first_frame {
+            if home.has_missing_icons() && home.load_missing_icons(&app) {
+                sched.request_redraw();
+            }
+            if needs_refresh {
+                needs_refresh = false;
+                if home.refresh(&app) {
+                    sched.request_redraw();
+                }
+                if home.update_date(&app) {
+                    sched.request_redraw();
+                }
+            }
+        }
+
         if sched.is_animating() {
             policy.note_activity(now);
         }
@@ -155,7 +207,9 @@ fn android_main(app: AndroidApp) {
             }
         }
         if now.duration_since(last_report) >= REPORT_EVERY {
-            log::info!("frames drawn in last 5s: {frames}");
+            if frames > 0 {
+                log::info!("frames drawn in last 5s: {frames}");
+            }
             frames = 0;
             last_report = now;
         }
@@ -163,35 +217,81 @@ fn android_main(app: AndroidApp) {
     log::info!("android_main end");
 }
 
-/// Taps in this many pixels from the top open the keyboard (risk check only).
-const KEYBOARD_TAP_ZONE: f32 = 300.0;
+/// Space the status and navigation bars take, from the window's content
+/// area. Before Android reports it, assume the usual 24 dp and 48 dp.
+fn insets(app: &AndroidApp, (w, h): (i32, i32)) -> Insets {
+    let r = app.content_rect();
+    if r.right <= r.left || r.bottom <= r.top {
+        let d = app.config().density().unwrap_or(160) as f32 / 160.0;
+        return Insets { top: 24.0 * d, bottom: 48.0 * d, left: 0.0, right: 0.0 };
+    }
+    Insets {
+        top: r.top as f32,
+        bottom: (h - r.bottom).max(0) as f32,
+        left: r.left as f32,
+        right: (w - r.right).max(0) as f32,
+    }
+}
+
+fn current_minute() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() / 60)
+}
+
+fn until_next_minute() -> Duration {
+    let ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    Duration::from_millis(60_000 - ms % 60_000 + 50)
+}
+
+fn monotonic_ns(clock: libc::clockid_t) -> i64 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    unsafe { libc::clock_gettime(clock, &mut ts) };
+    ts.tv_sec * 1_000_000_000 + ts.tv_nsec
+}
+
+/// Time since this process started, from /proc (for start-up timing logs).
+fn ms_since_process_start() -> f64 {
+    let Ok(stat) = std::fs::read_to_string("/proc/self/stat") else { return -1.0 };
+    // Field 22 (starttime, clock ticks since boot) comes after the ")" of the name.
+    let Some(rest) = stat.rsplit_once(')').map(|(_, r)| r) else { return -1.0 };
+    let Some(ticks) = rest.split_whitespace().nth(19).and_then(|v| v.parse::<f64>().ok()) else { return -1.0 };
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
+    let now = monotonic_ns(libc::CLOCK_BOOTTIME) as f64 / 1e6;
+    now - ticks / hz * 1e3
+}
 
 #[derive(Default)]
 struct InputOut {
-    /// Any finger down, moving or lifted.
-    touched: bool,
-    tap: Option<(f32, f32)>,
+    touches: Vec<Touch>,
     back: bool,
 }
 
 /// Input must always be consumed or Android reports the app as frozen.
+/// Touches keep the time Android stamped on them, so swipe speed is right
+/// even when several arrive in one batch.
 fn drain_input(app: &AndroidApp) -> InputOut {
     let mut out = InputOut::default();
     let Ok(mut iter) = app.input_events_iter() else { return out };
+    let (now, mono_now) = (Instant::now(), monotonic_ns(libc::CLOCK_MONOTONIC));
     while iter.next(|event| match event {
         // A launcher ignores Back; letting it through would close us.
         InputEvent::KeyEvent(key) if key.key_code() == Keycode::Back => {
             if key.action() == KeyAction::Up {
-                log::info!("back ignored");
                 out.back = true;
             }
             InputStatus::Handled
         }
         InputEvent::MotionEvent(m) => {
-            out.touched = true;
-            if m.action() == MotionAction::Up {
+            let kind = match m.action() {
+                MotionAction::Down => Some(TouchKind::Down),
+                MotionAction::Move => Some(TouchKind::Move),
+                MotionAction::Up => Some(TouchKind::Up),
+                MotionAction::Cancel => Some(TouchKind::Cancel),
+                _ => None,
+            };
+            if let Some(kind) = kind {
                 let p = m.pointer_at_index(0);
-                out.tap = Some((p.x(), p.y()));
+                let age = Duration::from_nanos((mono_now - m.event_time()).max(0) as u64);
+                out.touches.push(Touch { kind, x: p.x(), y: p.y(), t: now.checked_sub(age).unwrap_or(now) });
             }
             InputStatus::Handled
         }
@@ -203,100 +303,6 @@ fn drain_input(app: &AndroidApp) -> InputOut {
 fn on_text(state: &ImeState) {
     let compose = state.compose.map_or("none".to_string(), |c| format!("{}..{}", c.0, c.1));
     log::info!("text: {:?} sel={}..{} compose={}", state.text, state.selection.0, state.selection.1, compose);
-}
-
-/// The drawing-kit check scene: shapes, text and the first 16 apps.
-struct Scene {
-    apps: Vec<(AppEntry, Option<(Vec<u8>, i32, i32)>)>,
-    density: f32,
-    hits: std::cell::RefCell<Vec<(Rect, usize)>>,
-}
-
-impl Scene {
-    fn load(app: &AndroidApp) -> Scene {
-        let all = apps::list_apps(app);
-        log::info!("apps: {}", all.len());
-        let size = icon_px(app);
-        let apps = all
-            .into_iter()
-            .take(16)
-            .map(|e| {
-                let icon = apps::load_icon_rgba(app, &e, size);
-                (e, icon)
-            })
-            .collect();
-        let density = app.config().density().unwrap_or(160) as f32 / 160.0;
-        Scene { apps, density, hits: Default::default() }
-    }
-
-    fn hit(&self, x: f32, y: f32) -> Option<&AppEntry> {
-        let hits = self.hits.borrow();
-        hits.iter().find(|(r, _)| r.contains(x, y)).map(|&(_, i)| &self.apps[i].0)
-    }
-}
-
-/// 56dp in pixels for this screen.
-fn icon_px(app: &AndroidApp) -> i32 {
-    let dpi = app.config().density().unwrap_or(160) as i32;
-    56 * dpi / 160
-}
-
-fn draw(g: &GlSurface, r: &mut Renderer, batch: &mut Batch, scene: &Scene) {
-    let gl = g.gl();
-    let (w, h) = g.size();
-    let (wf, d) = (w as f32, scene.density);
-    let dp = |v: f32| v * d;
-    r.begin_frame();
-    batch.clear();
-
-    let white = Rgba::hex(0xFFFFFF);
-    let holo = Rgba::hex(0x33B5E5);
-
-    // Panel with title, divider, outline pill, circle and glow.
-    let panel = Rect::new(dp(16.0), dp(40.0), wf - dp(32.0), dp(190.0));
-    batch.rect(panel, Rgba::hex(0x101917).with_alpha(0.92), dp(24.0));
-    r.text(gl, batch, "Drawing kit ✓", panel.x + dp(20.0), panel.y + dp(40.0), dp(20.0), panel.w - dp(40.0), white, true);
-    batch.line(panel.x + dp(20.0), panel.y + dp(58.0), panel.x + panel.w - dp(20.0), panel.y + dp(58.0), 1.0, white.with_alpha(0.2));
-    let pill = Rect::new(panel.x + dp(20.0), panel.y + dp(80.0), dp(150.0), dp(52.0));
-    batch.outline(pill, Rgba::hex(0x9CC9B8), dp(26.0), dp(2.0));
-    r.text(gl, batch, "Outline", pill.x + dp(24.0), pill.y + dp(32.0), dp(16.0), dp(110.0), Rgba::hex(0x9CC9B8), false);
-    batch.circle(pill.x + pill.w + dp(44.0), pill.y + pill.h / 2.0, dp(22.0), Rgba::hex(0xFF8800));
-    let gc = (panel.x + panel.w - dp(60.0), pill.y + pill.h / 2.0);
-    let gr = Rect::new(gc.0 - dp(22.0), gc.1 - dp(22.0), dp(44.0), dp(44.0));
-    batch.glow(gr, holo.with_alpha(0.8), dp(22.0), dp(14.0));
-    batch.circle(gc.0, gc.1, dp(22.0), holo);
-
-    // A long mixed-script line that has to be cut.
-    r.text(gl, batch, "設定 Settings 日本語テスト — a very long label that must be cut",
-        dp(16.0), dp(262.0), dp(14.0), wf - dp(32.0), white, false);
-
-    // 4-column grid of real apps, round icons, labels underneath.
-    let cell_w = (wf - dp(16.0)) / 4.0;
-    let icon = dp(56.0);
-    let mut hits = scene.hits.borrow_mut();
-    hits.clear();
-    for (i, (entry, px)) in scene.apps.iter().enumerate() {
-        let (col, row) = ((i % 4) as f32, (i / 4) as f32);
-        let x = dp(8.0) + col * cell_w;
-        let y = dp(290.0) + row * dp(100.0);
-        let ir = Rect::new(x + (cell_w - icon) / 2.0, y, icon, icon);
-        let uv = px.as_ref().and_then(|(p, iw, ih)| r.icon(gl, &entry.package, p, *iw as u32, *ih as u32));
-        match uv {
-            Some(uv) => batch.image(ir, uv, icon / 2.0, 1.0),
-            None => batch.circle(ir.x + icon / 2.0, ir.y + icon / 2.0, icon / 2.0, Rgba::hex(0x737373)),
-        }
-        // Centre the label: measure first, then place.
-        let max = cell_w - dp(8.0);
-        let mut probe = Batch::new();
-        let lw = r.text(gl, &mut probe, &entry.label, 0.0, 0.0, dp(12.0), max, white, false);
-        r.text(gl, batch, &entry.label, x + (cell_w - lw) / 2.0, y + icon + dp(20.0), dp(12.0), max, white, false);
-        hits.push((ir, i));
-    }
-
-    r.draw(gl, batch, (w, h));
-    if let Err(e) = g.swap() {
-        log::error!("swap failed: {e}");
-    }
 }
 
 unsafe extern "C" {

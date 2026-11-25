@@ -81,6 +81,12 @@ impl Pager {
         self.pages
     }
 
+    /// True once the finger has moved far enough to stop being a tap.
+    pub fn moved(&self) -> bool {
+        self.drag.is_some_and(|d| d.lock != Lock::Undecided)
+    }
+
+    /// True while a finger is down and has turned into a sideways drag.
     pub fn dragging_pages(&self) -> bool {
         self.drag.is_some_and(|d| d.lock == Lock::Horizontal)
     }
@@ -283,8 +289,11 @@ mod tests {
         let t0 = Instant::now();
         let mut p = Pager::new(2, W);
         p.touch_down(500.0, 500.0, t0);
-        p.touch_move(510.0, 700.0, ms(t0, 50));
+        p.touch_move(505.0, 510.0, ms(t0, 50));
+        assert!(!p.moved());
+        p.touch_move(510.0, 700.0, ms(t0, 60));
         p.touch_move(520.0, 800.0, ms(t0, 100));
+        assert!(p.moved());
         assert!(!p.dragging_pages());
         match p.touch_up(520.0, 800.0, ms(t0, 120)) {
             Gesture::VerticalSwipe { dy } => assert!((dy - 300.0).abs() < 0.01),
