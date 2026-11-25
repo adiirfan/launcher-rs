@@ -55,6 +55,8 @@ pub enum Action {
     StartRename,
     /// The name is saved; put the keyboard away.
     EndRename,
+    /// Bring the keyboard back (tapping the name again while typing it).
+    ShowKeyboard,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -864,6 +866,10 @@ impl Home {
                             if let Some(Item::Folder(folder)) = self.layout.slot(f.page, f.col, f.row) {
                                 return folder.apps.get(i).cloned().map_or(Action::None, Action::Launch);
                             }
+                        }
+                        (FolderHit::Name, true) => {
+                            self.mode = Mode::Folder(f);
+                            return Action::ShowKeyboard;
                         }
                         (FolderHit::Name, false) => {
                             f.renaming = Some(String::new());

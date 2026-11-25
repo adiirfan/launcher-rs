@@ -422,6 +422,7 @@ fn home_action(app: &AndroidApp, drawer: &mut Drawer, action: Action, now: Insta
             keyboard::show(app, false);
             keyboard::clear_text(app);
         }
+        Action::ShowKeyboard => keyboard::show(app, true),
     }
 }
 

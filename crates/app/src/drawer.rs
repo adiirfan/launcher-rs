@@ -167,6 +167,8 @@ impl Drawer {
         self.shown = 0.0;
         self.focused = false;
         self.pressed = None;
+        self.press.cancel();
+        self.press_at = None;
         self.set_query("");
     }
 
