@@ -13,9 +13,12 @@ use launcher_draw::slots::SlotPool;
 use launcher_draw::text::layout_line;
 use launcher_draw::{Rect, Rgba};
 
-/// Icon atlas: 2048×1024 holds about 75 home-size icons, enough for two
-/// full pages plus the dock while swiping between them.
+/// Icon atlas: starts 2048×1024 (about 72 home-size icons) and grows
+/// taller to hold every app on phones with more, so no icon is ever
+/// pushed out and drawn grey while scrolling.
 const ICON_ATLAS: (u32, u32) = (2048, 1024);
+/// Never taller than this (4096 is safe on every OpenGL ES 3 phone).
+const ICON_ATLAS_MAX_H: u32 = 4096;
 const GLYPH_ATLAS: (u32, u32) = (1024, 1024);
 
 const VS: &str = r#"#version 300 es
@@ -156,6 +159,8 @@ pub struct Renderer {
     icons: Atlas,
     /// Icon slots inside `icons`; sized by the first icon drawn.
     icon_slots: Option<SlotPool>,
+    /// Current height of the icon atlas (its width stays ICON_ATLAS.0).
+    icon_h: u32,
     glyphs: Atlas,
     glyph_keys: HashMap<(char, u32, Weight), Option<GlyphSlot>>,
     /// One set per weight, loaded the first time that weight is drawn.
@@ -209,6 +214,7 @@ impl Renderer {
                 icons: Atlas::new(gl, glow::RGBA8, glow::RGBA, ICON_ATLAS),
                 glyphs: Atlas::new(gl, glow::R8, glow::RED, GLYPH_ATLAS),
                 icon_slots: None,
+                icon_h: ICON_ATLAS.1,
                 glyph_keys: HashMap::new(),
                 // Regular is needed by every screen (and for line heights): load it now.
                 fonts: [None, Some(fonts::load_weight(Weight::Regular)), None, None],
@@ -262,8 +268,7 @@ impl Renderer {
     }
 
     fn slot_uv(&self, (x, y): (u32, u32), size: u32) -> [f32; 4] {
-        let (sw, sh) = ICON_ATLAS;
-        let (sw, sh) = (sw as f32, sh as f32);
+        let (sw, sh) = (ICON_ATLAS.0 as f32, self.icon_h as f32);
         [x as f32 / sw, y as f32 / sh, (x + size) as f32 / sw, (y + size) as f32 / sh]
     }
 
@@ -273,6 +278,43 @@ impl Renderer {
         let size = slots.slot_size();
         let at = slots.get(key)?;
         Some(self.slot_uv(at, size))
+    }
+
+    /// Make room for `count` icons of `px` pixels: the atlas grows taller,
+    /// copying what's in it, so every icon stays where it is.
+    pub fn reserve_icons(&mut self, gl: &glow::Context, count: usize, px: u32) {
+        if px == 0 || self.icon_slots.as_ref().is_some_and(|p| p.slot_size() != px) {
+            return;
+        }
+        let need = SlotPool::height_for(ICON_ATLAS.0, count, px).min(ICON_ATLAS_MAX_H);
+        if need <= self.icon_h {
+            return;
+        }
+        let w = ICON_ATLAS.0 as i32;
+        unsafe {
+            let old = self.icons.tex;
+            let new = Atlas::new(gl, glow::RGBA8, glow::RGBA, (ICON_ATLAS.0, need)).tex;
+            // Copy the old pixels across through a framebuffer that reads the old texture.
+            let fbo = gl.create_framebuffer().expect("framebuffer");
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(fbo));
+            gl.framebuffer_texture_2d(glow::READ_FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(old), 0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(new));
+            gl.copy_tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, 0, 0, w, self.icon_h as i32);
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            gl.delete_framebuffer(fbo);
+            gl.delete_texture(old);
+            self.icons.tex = new;
+        }
+        log::info!("icon atlas grown {}x{} -> {}x{need} for {count} icons", ICON_ATLAS.0, self.icon_h, ICON_ATLAS.0);
+        self.icon_h = need;
+        if let Some(p) = self.icon_slots.as_mut() {
+            p.grow(need);
+        }
+    }
+
+    /// An icon can go in without pushing another out.
+    pub fn icon_room(&self) -> bool {
+        self.icon_slots.as_ref().is_none_or(SlotPool::has_free)
     }
 
     /// Drop an icon whose app changed.
@@ -291,7 +333,7 @@ impl Renderer {
             return None;
         }
         if self.icon_slots.as_ref().is_none_or(|p| p.slot_size() != w) {
-            let pool = SlotPool::new(ICON_ATLAS.0, ICON_ATLAS.1, w);
+            let pool = SlotPool::new(ICON_ATLAS.0, self.icon_h, w);
             log::info!("icon slots: {} of {w}px", pool.capacity());
             self.icon_slots = Some(pool);
         }

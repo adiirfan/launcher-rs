@@ -194,6 +194,40 @@ impl Icons {
         false
     }
 
+    /// Put icons into the atlas ahead of being drawn, until `budget` is used
+    /// or the atlas has no free slot. True while some are left. Call only
+    /// while nothing moves, after `warm` has read their files.
+    pub fn preload<'a>(&mut self, gl: &glow::Context, r: &mut Renderer, apps: impl IntoIterator<Item = &'a AppKey>, budget: Duration) -> bool {
+        if self.size == 0 {
+            return false;
+        }
+        let t = Instant::now();
+        for key in apps {
+            let ak = atlas_key(key);
+            if r.icon_uv(&ak).is_some() || self.failed.contains(key) {
+                continue;
+            }
+            let Some(bytes) = self.bytes.get(key) else { continue };
+            if !r.icon_room() {
+                return false;
+            }
+            if t.elapsed() >= budget {
+                return true;
+            }
+            if let Some((px, w, h)) = Store::decode_icon(bytes, self.size) {
+                r.icon(gl, &ak, &px, w, h);
+            }
+        }
+        false
+    }
+
+    /// Wait for queued uploads to finish, so the graphics driver can reuse
+    /// its temporary copies instead of piling up more (seen on Adreno).
+    pub fn settle(gl: &glow::Context) {
+        use glow::HasContext;
+        unsafe { gl.finish() };
+    }
+
     /// Give back the compressed copies; they're read again when needed.
     pub fn trim(&mut self) {
         self.bytes = HashMap::new();

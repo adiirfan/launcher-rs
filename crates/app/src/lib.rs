@@ -102,6 +102,8 @@ fn android_main(app: AndroidApp) {
     let mut background = false;
     // The refresh the last frame was drawn for, while something was moving.
     let mut moving_tick: Option<i64> = None;
+    // Icons are still being put into the atlas ahead of time.
+    let mut preloading = true;
 
     while !quit {
         let now = Instant::now();
@@ -302,6 +304,9 @@ fn android_main(app: AndroidApp) {
                 let screen = g.size();
                 let ins = insets(&app, screen, &mut last_insets);
                 icons.begin_frame(r);
+                // Room for every app (plus a row for new installs), so
+                // scrolling never pushes an icon out.
+                r.reserve_icons(g.gl(), home.apps().0.len() + 12, icons.size());
                 let mut moving = false;
                 if !drawer.covers_home(now) && !settings.covers_home(now) {
                     moving |= home.draw(g.gl(), r, &mut batch, &mut icons, screen, ins, now);
@@ -388,6 +393,19 @@ fn android_main(app: AndroidApp) {
                 }
                 let keys = home.apps().0.iter().map(|a| &a.key);
                 background = icons.warm(keys, Duration::from_millis(4)) || icons.has_missing();
+                if !background
+                    && let (Some(g), Some(r)) = (gfx.as_ref().filter(|g| g.has_surface()), renderer.as_mut())
+                {
+                    let keys = home.apps().0.iter().map(|a| &a.key);
+                    let more = icons.preload(g.gl(), r, keys, Duration::from_millis(4));
+                    icons::Icons::settle(g.gl());
+                    // Done filling: hand back the memory the unpacking used.
+                    if preloading && !more {
+                        purge_freed_memory();
+                    }
+                    preloading = more;
+                    background = more;
+                }
             }
             let t = Instant::now();
             if drawer.after_frame(&app) {
