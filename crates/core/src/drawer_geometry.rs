@@ -1,4 +1,4 @@
-//! Where things sit on the app list screen, in pixels.
+//! Where things sit on the Holo app list screen, in pixels.
 
 use crate::geometry::Insets;
 
@@ -11,6 +11,8 @@ pub struct DrawerMetrics {
     pub density: f32,
     pub insets: Insets,
     pub icon: f32,
+    /// The tab header ("APPS"): x, y, w, h.
+    pub header: (f32, f32, f32, f32),
     pub field: (f32, f32, f32, f32),
     pub list_top: f32,
     pub list_left: f32,
@@ -19,47 +21,43 @@ pub struct DrawerMetrics {
     /// Space above the first row inside the list.
     pub pad_top: f32,
     pub label_gap: f32,
-    pub back_button: (f32, f32, f32, f32),
+    /// The HOME bar along the bottom: x, y, w, h.
+    pub home_bar: (f32, f32, f32, f32),
 }
 
 impl DrawerMetrics {
     pub fn new(screen_w: f32, screen_h: f32, density: f32, insets: Insets, icon: f32) -> DrawerMetrics {
         let d = density;
         let inner_w = screen_w - insets.left - insets.right;
-        let field = (insets.left + 20.0 * d, insets.top + 20.0 * d, inner_w - 40.0 * d, 52.0 * d);
-        let back_w = 150.0 * d;
-        let back_h = 44.0 * d;
+        let header = (insets.left, insets.top, inner_w, 56.0 * d);
+        let field = (insets.left + 20.0 * d, header.1 + header.3 + 14.0 * d, inner_w - 40.0 * d, 44.0 * d);
+        let bar_h = 64.0 * d;
         DrawerMetrics {
             screen_w,
             screen_h,
             density,
             insets,
             icon,
+            header,
             field,
-            list_top: field.1 + field.3 + 16.0 * d,
-            list_left: insets.left + 12.0 * d,
-            cell_w: (inner_w - 24.0 * d) / COLS as f32,
-            row_h: icon + 8.0 * d + 18.0 * d + 22.0 * d,
-            pad_top: 4.0 * d,
-            label_gap: 8.0 * d,
-            back_button: (
-                screen_w - insets.right - 20.0 * d - back_w,
-                screen_h - insets.bottom - 24.0 * d - back_h,
-                back_w,
-                back_h,
-            ),
+            list_top: field.1 + field.3 + 6.0 * d,
+            list_left: insets.left + 8.0 * d,
+            cell_w: (inner_w - 16.0 * d) / COLS as f32,
+            row_h: icon + 6.0 * d + 18.0 * d + 22.0 * d,
+            pad_top: 14.0 * d,
+            label_gap: 6.0 * d,
+            home_bar: (0.0, screen_h - insets.bottom - bar_h, screen_w, bar_h),
         }
     }
 
     /// Height of the list's contents: `rows` of apps plus `extra` below them.
-    /// The end leaves room so the last row clears the "Back to Home" button.
     pub fn content_height(&self, rows: usize, extra: f32) -> f32 {
-        self.pad_top + rows as f32 * self.row_h + extra + 32.0 * self.density + self.back_button.3
+        self.pad_top + rows as f32 * self.row_h + extra + 24.0 * self.density
     }
 
-    /// Height of the window onto the list.
+    /// Height of the window onto the list, down to the HOME bar.
     pub fn visible_height(&self) -> f32 {
-        self.screen_h - self.list_top - self.insets.bottom
+        self.home_bar.1 - self.list_top
     }
 
     pub fn cell_rect(&self, i: usize, scroll: f32) -> (f32, f32, f32, f32) {
@@ -73,7 +71,7 @@ impl DrawerMetrics {
     }
 
     pub fn hit_cell(&self, x: f32, y: f32, scroll: f32, count: usize) -> Option<usize> {
-        if y < self.list_top || y > self.screen_h - self.insets.bottom {
+        if y < self.list_top || y >= self.home_bar.1 {
             return None;
         }
         let rx = x - self.list_left;
@@ -102,29 +100,37 @@ mod tests {
     }
 
     #[test]
-    fn field_sits_below_the_status_bar() {
+    fn header_then_field_then_list() {
         let m = m();
-        assert_eq!(m.field, (60.0, 132.0, 960.0, 156.0));
-        assert!(m.list_top >= m.field.1 + m.field.3);
+        assert_eq!(m.header, (0.0, 72.0, 1080.0, 168.0));
+        assert_eq!(m.field, (60.0, 282.0, 960.0, 132.0));
+        assert_eq!(m.list_top, 432.0);
+    }
+
+    #[test]
+    fn home_bar_sits_on_the_nav_bar() {
+        let m = m();
+        assert_eq!(m.home_bar, (0.0, 1824.0, 1080.0, 192.0));
+        assert_eq!(m.visible_height(), 1824.0 - 432.0);
     }
 
     #[test]
     fn four_cells_fill_the_width() {
         let m = m();
-        let first = m.cell_rect(0, 0.0);
+        assert_eq!(m.cell_rect(0, 0.0).0, 24.0);
         let last = m.cell_rect(3, 0.0);
-        assert_eq!(first.0, 36.0);
-        assert!((last.0 + last.2 - (1080.0 - 36.0)).abs() < 0.01);
-        assert_eq!(m.cell_rect(4, 0.0).1, first.1 + m.row_h);
+        assert!((last.0 + last.2 - 1056.0).abs() < 0.01);
+        assert_eq!(m.cell_rect(4, 0.0).1, m.cell_rect(0, 0.0).1 + m.row_h);
     }
 
     #[test]
-    fn hits_follow_the_scroll() {
+    fn hits_follow_the_scroll_and_stop_at_the_home_bar() {
         let m = m();
         let (x, y) = centre(m.icon_rect(5, 0.0));
         assert_eq!(m.hit_cell(x, y, 0.0, 61), Some(5));
         assert_eq!(m.hit_cell(x, y, m.row_h, 61), Some(9));
         assert_eq!(m.hit_cell(x, m.list_top - 1.0, 0.0, 61), None);
+        assert_eq!(m.hit_cell(x, m.home_bar.1 + 5.0, 0.0, 61), None);
         assert_eq!(m.hit_cell(x, y, 0.0, 5), None);
         assert_eq!(m.hit_cell(5.0, y, 0.0, 61), None, "left margin");
     }
@@ -135,15 +141,5 @@ mod tests {
         let h = m.content_height(16, 0.0);
         assert!((m.content_height(16, 300.0) - h - 300.0).abs() < 0.01);
         assert!(h >= 16.0 * m.row_h);
-        assert!(m.visible_height() < 2160.0 - m.list_top);
-    }
-
-    #[test]
-    fn back_button_above_the_nav_bar() {
-        let m = m();
-        let (x, y, w, h) = m.back_button;
-        assert!(y + h <= 2160.0 - 144.0 - 72.0 + 0.01);
-        assert!(x + w <= 1080.0 - 60.0 + 0.01);
-        assert_eq!(h, 132.0);
     }
 }

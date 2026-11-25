@@ -71,3 +71,4 @@ mod tests {
     }
 }
 pub mod slots;
+pub mod shape;
