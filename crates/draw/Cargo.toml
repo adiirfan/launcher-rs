@@ -1,0 +1,8 @@
+[package]
+name = "launcher-draw"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+ab_glyph = "0.2.32"
+bytemuck = { version = "1", features = ["derive"] }
