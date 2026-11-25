@@ -3,6 +3,7 @@
 pub mod anim;
 pub mod atlas;
 pub mod batch;
+pub mod font;
 pub mod text;
 
 /// A rectangle in pixels, y down.

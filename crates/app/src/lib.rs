@@ -5,6 +5,7 @@ mod gl_surface;
 mod quad;
 mod jni_util;
 mod apps;
+mod fonts;
 
 use std::time::{Duration, Instant};
 
