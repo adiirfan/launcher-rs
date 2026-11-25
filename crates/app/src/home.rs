@@ -1085,7 +1085,7 @@ impl Home {
 
     /// Text with a dark shadow under it so it reads on light wallpapers.
     #[allow(clippy::too_many_arguments)]
-    fn shadowed(&self, gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, s: &str, x: f32, baseline: f32, em: f32, spacing: f32, max_w: f32, color: Rgba, weight: Weight) -> f32 {
+    fn shadowed(&self, gl: &crate::gpu::Gpu, r: &mut Renderer, batch: &mut Batch, s: &str, x: f32, baseline: f32, em: f32, spacing: f32, max_w: f32, color: Rgba, weight: Weight) -> f32 {
         let d = self.density;
         r.text_spaced(gl, batch, s, x, baseline + 1.0 * d, em, spacing, max_w, Rgba::hex(BLACK).with_alpha(0.5), weight);
         r.text_spaced(gl, batch, s, x, baseline, em, spacing, max_w, color, weight)
@@ -1093,7 +1093,7 @@ impl Home {
 
     /// Build the frame. Returns true while something is still moving.
     #[allow(clippy::too_many_arguments)]
-    pub fn draw(&mut self, gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, icons: &mut Icons, screen: (i32, i32), insets: Insets, now: Instant) -> bool {
+    pub fn draw(&mut self, gl: &crate::gpu::Gpu, r: &mut Renderer, batch: &mut Batch, icons: &mut Icons, screen: (i32, i32), insets: Insets, now: Instant) -> bool {
         let m = self.metrics_for(screen, insets);
         let d = self.density;
         let size = m.icon.round() as u32;
@@ -1213,7 +1213,7 @@ impl Home {
     }
 
     /// The line under the date: music controls, or the next event.
-    fn draw_info(&self, gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, m: &HomeMetrics) {
+    fn draw_info(&self, gl: &crate::gpu::Gpu, r: &mut Renderer, batch: &mut Batch, m: &HomeMetrics) {
         let d = self.density;
         let quiet = Rgba::hex(holo::QUIET);
         let em = 14.0 * d;
@@ -1260,7 +1260,7 @@ impl Home {
 
     /// An item picked up: an accent ring and glow around it.
     #[allow(clippy::too_many_arguments)]
-    fn draw_lifted(&self, gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, icons: &mut Icons, item: &Item, (x, y, s): (f32, f32, f32)) {
+    fn draw_lifted(&self, gl: &crate::gpu::Gpu, r: &mut Renderer, batch: &mut Batch, icons: &mut Icons, item: &Item, (x, y, s): (f32, f32, f32)) {
         let d = self.density;
         let accent = Rgba::hex(holo::accent());
         let radius = match item {
@@ -1277,7 +1277,7 @@ impl Home {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn draw_overlays(&self, gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, icons: &mut Icons, m: &HomeMetrics, offset: f32) {
+    fn draw_overlays(&self, gl: &crate::gpu::Gpu, r: &mut Renderer, batch: &mut Batch, icons: &mut Icons, m: &HomeMetrics, offset: f32) {
         let d = self.density;
         let dim = |batch: &mut Batch| batch.rect(Rect::new(0.0, 0.0, m.screen_w, m.screen_h), Rgba::hex(BLACK).with_alpha(0.55), 0.0);
         match &self.mode {

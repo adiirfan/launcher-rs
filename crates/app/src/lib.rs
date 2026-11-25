@@ -2,6 +2,8 @@
 #![cfg(target_os = "android")]
 
 mod gl_surface;
+mod gpu;
+mod vk_surface;
 mod render;
 mod jni_util;
 mod apps;
@@ -34,7 +36,7 @@ use launcher_core::refresh::{RateVote, RefreshPolicy};
 use launcher_draw::batch::Batch;
 
 use drawer::{Drawer, DrawerAction};
-use gl_surface::GlSurface;
+use gpu::Gpu;
 use home::{Action, Home, Touch, TouchKind};
 use icons::Icons;
 use render::Renderer;
@@ -69,7 +71,7 @@ fn android_main(app: AndroidApp) {
     keyboard::init(&app);
 
     let mut sched = FrameScheduler::new();
-    let mut gfx: Option<GlSurface> = None;
+    let mut gfx: Option<Gpu> = None;
     let mut renderer: Option<Renderer> = None;
     let mut batch = Batch::new();
     let store = cache::Store::open(&app);
@@ -128,7 +130,7 @@ fn android_main(app: AndroidApp) {
                         if let Some(window) = app.native_window() {
                             let result = match gfx.as_mut() {
                                 Some(g) => g.resume(&window),
-                                None => GlSurface::new(&window).map(|g| gfx = Some(g)),
+                                None => Gpu::new(&window, render::ICON_ATLAS, render::GLYPH_ATLAS).map(|g| gfx = Some(g)),
                             };
                             if let Err(e) = result {
                                 log::error!("GL setup failed: {e}");
@@ -291,7 +293,7 @@ fn android_main(app: AndroidApp) {
             }
             if let Some(g) = gfx.as_ref().filter(|g| g.has_surface()) {
                 let r = renderer.get_or_insert_with(|| {
-                    Renderer::new(g.gl())
+                    Renderer::new(g)
                 });
                 let t0 = Instant::now();
                 r.begin_frame();
@@ -301,12 +303,12 @@ fn android_main(app: AndroidApp) {
                 icons.begin_frame(r);
                 let mut moving = false;
                 if !drawer.covers_home(now) && !settings.covers_home(now) {
-                    moving |= home.draw(g.gl(), r, &mut batch, &mut icons, screen, ins, now);
+                    moving |= home.draw(g, r, &mut batch, &mut icons, screen, ins, now);
                 }
-                moving |= drawer.draw(g.gl(), r, &mut batch, &mut icons, home.apps(), home.dots(), screen, ins, now);
-                moving |= settings.draw(g.gl(), r, &mut batch, &mut icons, &home, screen, ins, now);
+                moving |= drawer.draw(g, r, &mut batch, &mut icons, home.apps(), home.dots(), screen, ins, now);
+                moving |= settings.draw(g, r, &mut batch, &mut icons, &home, screen, ins, now);
                 let built = t0.elapsed();
-                r.draw(g.gl(), &batch, screen);
+                r.draw(g, &batch, screen);
                 let submitted = t0.elapsed();
                 if submitted > SLOW {
                     let ms = |d: Duration| d.as_secs_f64() * 1e3;
@@ -375,7 +377,7 @@ fn android_main(app: AndroidApp) {
                     r.load_fonts();
                     let screen = g.size();
                     let ins = insets(&app, screen, &mut last_insets);
-                    settings.warm(g.gl(), r, &mut icons, &home, screen, ins, now);
+                    settings.warm(g, r, &mut icons, &home, screen, ins, now);
                     log::info!("fonts and settings text ready in {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
                 }
                 let keys = home.apps().0.iter().map(|a| &a.key);
@@ -471,6 +473,13 @@ impl log::Log for QuietLogger {
 
 /// Warnings only, unless `adb shell setprop debug.launcherrs.log info`
 /// (or `debug`) asks for more. Read once at start.
+/// A system property's value ("" when unset).
+pub(crate) fn property(name: &std::ffi::CStr) -> String {
+    let mut value = [0u8; 92];
+    let n = unsafe { __system_property_get(name.as_ptr(), value.as_mut_ptr().cast()) };
+    String::from_utf8_lossy(&value[..n.clamp(0, 91) as usize]).into_owned()
+}
+
 fn log_level() -> log::LevelFilter {
     let mut value = [0u8; 92];
     let n = unsafe { __system_property_get(c"debug.launcherrs.log".as_ptr(), value.as_mut_ptr().cast()) };

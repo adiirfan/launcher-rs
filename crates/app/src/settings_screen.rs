@@ -422,7 +422,7 @@ impl SettingsScreen {
     /// Draw the main page once into a throwaway batch while idle, so its
     /// letters are ready before it first slides in (12 ms otherwise).
     #[allow(clippy::too_many_arguments)]
-    pub fn warm(&mut self, gl: &glow::Context, r: &mut Renderer, icons: &mut Icons, home: &Home, screen: (i32, i32), insets: Insets, now: Instant) {
+    pub fn warm(&mut self, gl: &crate::gpu::Gpu, r: &mut Renderer, icons: &mut Icons, home: &Home, screen: (i32, i32), insets: Insets, now: Instant) {
         if self.is_open() {
             return;
         }
@@ -434,7 +434,7 @@ impl SettingsScreen {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn draw(&mut self, gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, icons: &mut Icons, home: &Home, screen: (i32, i32), insets: Insets, now: Instant) -> bool {
+    pub fn draw(&mut self, gl: &crate::gpu::Gpu, r: &mut Renderer, batch: &mut Batch, icons: &mut Icons, home: &Home, screen: (i32, i32), insets: Insets, now: Instant) -> bool {
         let p = self.progress(now);
         if let Some(s) = self.slide
             && now >= s.start + s.dur

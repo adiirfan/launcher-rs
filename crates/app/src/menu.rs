@@ -33,7 +33,7 @@ pub fn top_bar_hit(bar: R4, x: f32, y: f32) -> Option<usize> {
 /// Three labels split by thin lines. Greyed-out parts do nothing; the part
 /// under a dragged icon lights up in the accent colour.
 #[allow(clippy::too_many_arguments)]
-pub fn draw_top_bar(gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, bar: R4, labels: [&str; 3], enabled: [bool; 3], hover: Option<usize>, d: f32) {
+pub fn draw_top_bar(gl: &crate::gpu::Gpu, r: &mut Renderer, batch: &mut Batch, bar: R4, labels: [&str; 3], enabled: [bool; 3], hover: Option<usize>, d: f32) {
     let (x, y, w, h) = bar;
     batch.rect(Rect::new(x, y, w, h), Rgba::hex(BLACK), 0.0);
     batch.rect(Rect::new(x, y + h - 1.0 * d, w, 1.0 * d), Rgba::hex(DIVIDER), 0.0);
@@ -87,7 +87,7 @@ pub fn popup_hit(popup: R4, rows: usize, x: f32, y: f32, d: f32) -> Option<usize
 /// The dark menu box. `caps` draws the labels as Holo buttons (14 sp
 /// medium capitals) instead of menu items (17 sp light).
 #[allow(clippy::too_many_arguments)]
-pub fn draw_popup(gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, popup: R4, labels: &[String], pressed: Option<usize>, caps: bool, d: f32) {
+pub fn draw_popup(gl: &crate::gpu::Gpu, r: &mut Renderer, batch: &mut Batch, popup: R4, labels: &[String], pressed: Option<usize>, caps: bool, d: f32) {
     let (x, y, w, h) = popup;
     batch.glow(Rect::new(x, y + 4.0 * d, w, h), Rgba::hex(BLACK).with_alpha(0.8), 2.0 * d, 16.0 * d);
     batch.rect(Rect::new(x, y, w, h), Rgba::hex(POPUP_BG), 2.0 * d);

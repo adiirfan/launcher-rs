@@ -16,7 +16,7 @@ const COLS: usize = 4;
 
 /// A dark circle with a white ring and up to four of its apps inside.
 #[allow(clippy::too_many_arguments)]
-pub fn draw_icon(gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, icons: &mut Icons, folder: &Folder, (x, y, s): (f32, f32, f32), pressed: bool, d: f32) {
+pub fn draw_icon(gl: &crate::gpu::Gpu, r: &mut Renderer, batch: &mut Batch, icons: &mut Icons, folder: &Folder, (x, y, s): (f32, f32, f32), pressed: bool, d: f32) {
     let fade = if pressed { 0.7 } else { 1.0 };
     let (cx, cy, rad) = (x + s / 2.0, y + s / 2.0, s / 2.0);
     batch.circle(cx, cy, rad, Rgba::hex(BLACK).with_alpha(0.6 * fade));
@@ -75,7 +75,7 @@ impl Panel {
     /// The panel, the folder's name (or the text being typed for a new
     /// one, with a caret), and its apps with their labels.
     #[allow(clippy::too_many_arguments)]
-    pub fn draw(&self, gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, icons: &mut Icons, folder: &Folder, labels: &HashMap<AppKey, String>, dots: Option<&HashSet<String>>, renaming: Option<&str>, pressed: Option<usize>, d: f32) {
+    pub fn draw(&self, gl: &crate::gpu::Gpu, r: &mut Renderer, batch: &mut Batch, icons: &mut Icons, folder: &Folder, labels: &HashMap<AppKey, String>, dots: Option<&HashSet<String>>, renaming: Option<&str>, pressed: Option<usize>, d: f32) {
         let (x, y, w, h) = self.panel;
         batch.glow(Rect::new(x, y + 4.0 * d, w, h), Rgba::hex(BLACK).with_alpha(0.8), 2.0 * d, 16.0 * d);
         batch.rect(Rect::new(x, y, w, h), Rgba::hex(POPUP_BG), 2.0 * d);

@@ -17,6 +17,7 @@ android-activity = { version = "0.6.1", features = ["native-activity"] }
 ndk = "0.9"
 khronos-egl = { version = "6", features = ["static", "no-pkg-config"] }
 glow = "0.18"
+ash = "0.38"
 jni = "0.22"
 libc = "0.2"
 log = "0.4"

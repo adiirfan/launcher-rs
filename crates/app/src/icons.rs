@@ -80,7 +80,7 @@ impl Icons {
         }
     }
 
-    fn uv(&mut self, gl: &glow::Context, r: &mut Renderer, key: &AppKey) -> Option<[f32; 4]> {
+    fn uv(&mut self, gl: &crate::gpu::Gpu, r: &mut Renderer, key: &AppKey) -> Option<[f32; 4]> {
         let ak = atlas_key(key);
         if let Some(uv) = r.icon_uv(&ak) {
             return Some(uv);
@@ -114,7 +114,7 @@ impl Icons {
     /// Queue an icon at (x, y) with edge `s`. Pressed icons shrink a little
     /// and dim; `fade` scales opacity (for screens sliding in or out).
     #[allow(clippy::too_many_arguments)]
-    pub fn draw(&mut self, gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, key: &AppKey, (x, y, s): (f32, f32, f32), pressed: bool, fade: f32) {
+    pub fn draw(&mut self, gl: &crate::gpu::Gpu, r: &mut Renderer, batch: &mut Batch, key: &AppKey, (x, y, s): (f32, f32, f32), pressed: bool, fade: f32) {
         let (mut x, mut y, mut s) = (x, y, s);
         let mut opacity = fade;
         if pressed {

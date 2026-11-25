@@ -9,14 +9,16 @@ use launcher_draw::batch::{Batch, Instance};
 use launcher_draw::font::FontSet;
 
 use crate::fonts::{self, Weight};
+use crate::gpu::Gpu;
+use crate::vk_surface::AtlasId;
 use launcher_draw::slots::SlotPool;
 use launcher_draw::text::layout_line;
 use launcher_draw::{Rect, Rgba};
 
 /// Icon atlas: 2048×1024 holds about 75 home-size icons, enough for two
 /// full pages plus the dock while swiping between them.
-const ICON_ATLAS: (u32, u32) = (2048, 1024);
-const GLYPH_ATLAS: (u32, u32) = (1024, 1024);
+pub const ICON_ATLAS: (u32, u32) = (2048, 1024);
+pub const GLYPH_ATLAS: (u32, u32) = (1024, 1024);
 
 const VS: &str = r#"#version 300 es
 layout(location = 0) in vec4 a_rect;
@@ -97,7 +99,6 @@ struct GlyphSlot {
 }
 
 struct Atlas {
-    tex: glow::Texture,
     packer: ShelfPacker,
     /// Set when it filled up; it is emptied at the start of the next frame so
     /// nothing already queued this frame points at overwritten pixels.
@@ -105,28 +106,13 @@ struct Atlas {
 }
 
 impl Atlas {
-    fn new(gl: &glow::Context, internal: u32, format: u32, (w, h): (u32, u32)) -> Atlas {
-        unsafe {
-            let tex = gl.create_texture().expect("atlas texture");
-            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            for (k, v) in [
-                (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
-                (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
-                (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
-                (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
-            ] {
-                gl.tex_parameter_i32(glow::TEXTURE_2D, k, v as i32);
-            }
-            gl.tex_image_2d(
-                glow::TEXTURE_2D, 0, internal as i32, w as i32, h as i32, 0, format,
-                glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None),
-            );
-            Atlas { tex, packer: ShelfPacker::new(w, h), full: false }
-        }
+    fn new((w, h): (u32, u32)) -> Atlas {
+        Atlas { packer: ShelfPacker::new(w, h), full: false }
     }
 
-    /// Copy `pixels` in; returns normalised uv, or `None` (and marks full).
-    fn put(&mut self, gl: &glow::Context, w: u32, h: u32, format: u32, pixels: &[u8]) -> Option<[f32; 4]> {
+    /// Room for a w×h picture: where it goes and its normalised uv, or
+    /// `None` (and marks full).
+    fn alloc(&mut self, w: u32, h: u32) -> Option<((u32, u32), [f32; 4])> {
         if self.full {
             return None;
         }
@@ -134,26 +120,107 @@ impl Atlas {
             self.full = true;
             return None;
         };
-        unsafe {
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.tex));
-            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-            gl.tex_sub_image_2d(
-                glow::TEXTURE_2D, 0, x as i32, y as i32, w as i32, h as i32, format,
-                glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(pixels)),
-            );
-        }
         let (sw, sh) = self.packer.size();
         let (sw, sh) = (sw as f32, sh as f32);
-        Some([x as f32 / sw, y as f32 / sh, (x + w) as f32 / sw, (y + h) as f32 / sh])
+        Some(((x, y), [x as f32 / sw, y as f32 / sh, (x + w) as f32 / sw, (y + h) as f32 / sh]))
     }
 }
 
-pub struct Renderer {
+/// The OpenGL ES objects (absent when drawing with Vulkan).
+struct GlParts {
     program: glow::Program,
     vao: glow::VertexArray,
     vbo: glow::Buffer,
     u_screen: Option<glow::UniformLocation>,
-    icons: Atlas,
+    icon_tex: glow::Texture,
+    glyph_tex: glow::Texture,
+}
+
+fn gl_texture(gl: &glow::Context, internal: u32, format: u32, (w, h): (u32, u32)) -> glow::Texture {
+    unsafe {
+        let tex = gl.create_texture().expect("atlas texture");
+        gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+        for (k, v) in [
+            (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+            (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+            (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+            (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+        ] {
+            gl.tex_parameter_i32(glow::TEXTURE_2D, k, v as i32);
+        }
+        gl.tex_image_2d(
+            glow::TEXTURE_2D, 0, internal as i32, w as i32, h as i32, 0, format,
+            glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None),
+        );
+        tex
+    }
+}
+
+/// Copy pixels into one atlas, on whichever graphics system is in use.
+fn upload(gpu: &Gpu, parts: Option<&GlParts>, atlas: AtlasId, (x, y): (u32, u32), w: u32, h: u32, pixels: &[u8]) {
+    match gpu {
+        Gpu::Vk(v) => v.borrow_mut().upload(atlas, x, y, w, h, pixels),
+        Gpu::Gl(g) => {
+            let (Some(p), gl) = (parts, g.gl()) else { return };
+            let (tex, format) = match atlas {
+                AtlasId::Icons => (p.icon_tex, glow::RGBA),
+                AtlasId::Glyphs => (p.glyph_tex, glow::RED),
+            };
+            unsafe {
+                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+                gl.tex_sub_image_2d(
+                    glow::TEXTURE_2D, 0, x as i32, y as i32, w as i32, h as i32, format,
+                    glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(pixels)),
+                );
+            }
+        }
+    }
+}
+
+fn gl_parts(gl: &glow::Context) -> GlParts {
+    unsafe {
+        let program = gl.create_program().expect("program");
+        for (kind, src) in [(glow::VERTEX_SHADER, VS), (glow::FRAGMENT_SHADER, FS)] {
+            let sh = gl.create_shader(kind).expect("shader");
+            gl.shader_source(sh, src);
+            gl.compile_shader(sh);
+            if !gl.get_shader_compile_status(sh) {
+                log::error!("shader: {}", gl.get_shader_info_log(sh));
+            }
+            gl.attach_shader(program, sh);
+        }
+        gl.link_program(program);
+        if !gl.get_program_link_status(program) {
+            log::error!("link: {}", gl.get_program_info_log(program));
+        }
+        gl.use_program(Some(program));
+        gl.uniform_1_i32(gl.get_uniform_location(program, "u_icons").as_ref(), 0);
+        gl.uniform_1_i32(gl.get_uniform_location(program, "u_glyphs").as_ref(), 1);
+
+        let vao = gl.create_vertex_array().expect("vao");
+        let vbo = gl.create_buffer().expect("vbo");
+        gl.bind_vertex_array(Some(vao));
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+        let stride = std::mem::size_of::<Instance>() as i32;
+        for loc in 0..5u32 {
+            gl.enable_vertex_attrib_array(loc);
+            gl.vertex_attrib_pointer_f32(loc, 4, glow::FLOAT, false, stride, (loc * 16) as i32);
+            gl.vertex_attrib_divisor(loc, 1);
+        }
+        GlParts {
+            u_screen: gl.get_uniform_location(program, "u_screen"),
+            program,
+            vao,
+            vbo,
+            icon_tex: gl_texture(gl, glow::RGBA8, glow::RGBA, ICON_ATLAS),
+            glyph_tex: gl_texture(gl, glow::R8, glow::RED, GLYPH_ATLAS),
+        }
+    }
+}
+
+pub struct Renderer {
+    gl: Option<GlParts>,
     /// Icon slots inside `icons`; sized by the first icon drawn.
     icon_slots: Option<SlotPool>,
     glyphs: Atlas,
@@ -168,53 +235,18 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(gl: &glow::Context) -> Renderer {
-        unsafe {
-            let program = gl.create_program().expect("program");
-            for (kind, src) in [(glow::VERTEX_SHADER, VS), (glow::FRAGMENT_SHADER, FS)] {
-                let sh = gl.create_shader(kind).expect("shader");
-                gl.shader_source(sh, src);
-                gl.compile_shader(sh);
-                if !gl.get_shader_compile_status(sh) {
-                    log::error!("shader: {}", gl.get_shader_info_log(sh));
-                }
-                gl.attach_shader(program, sh);
-            }
-            gl.link_program(program);
-            if !gl.get_program_link_status(program) {
-                log::error!("link: {}", gl.get_program_info_log(program));
-            }
-            gl.use_program(Some(program));
-            gl.uniform_1_i32(gl.get_uniform_location(program, "u_icons").as_ref(), 0);
-            gl.uniform_1_i32(gl.get_uniform_location(program, "u_glyphs").as_ref(), 1);
-
-            let vao = gl.create_vertex_array().expect("vao");
-            let vbo = gl.create_buffer().expect("vbo");
-            gl.bind_vertex_array(Some(vao));
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-            let stride = std::mem::size_of::<Instance>() as i32;
-            for loc in 0..5u32 {
-                gl.enable_vertex_attrib_array(loc);
-                gl.vertex_attrib_pointer_f32(loc, 4, glow::FLOAT, false, stride, (loc * 16) as i32);
-                gl.vertex_attrib_divisor(loc, 1);
-            }
-
-            Renderer {
-                u_screen: gl.get_uniform_location(program, "u_screen"),
-                program,
-                vao,
-                vbo,
-                icons: Atlas::new(gl, glow::RGBA8, glow::RGBA, ICON_ATLAS),
-                glyphs: Atlas::new(gl, glow::R8, glow::RED, GLYPH_ATLAS),
-                icon_slots: None,
-                glyph_keys: HashMap::new(),
-                // Regular is needed by every screen (and for line heights): load it now.
-                fonts: [None, Some(fonts::load_weight(Weight::Regular)), None, None],
-                last_log: Instant::now() - Duration::from_secs(60),
-                redraw: false,
-                spent_glyphs: Duration::ZERO,
-                spent_fonts: Duration::ZERO,
-            }
+    pub fn new(gpu: &Gpu) -> Renderer {
+        Renderer {
+            gl: gpu.gl().map(gl_parts),
+            glyphs: Atlas::new(GLYPH_ATLAS),
+            icon_slots: None,
+            glyph_keys: HashMap::new(),
+            // Regular is needed by every screen (and for line heights): load it now.
+            fonts: [None, Some(fonts::load_weight(Weight::Regular)), None, None],
+            last_log: Instant::now() - Duration::from_secs(60),
+            redraw: false,
+            spent_glyphs: Duration::ZERO,
+            spent_fonts: Duration::ZERO,
         }
     }
 
@@ -277,7 +309,7 @@ impl Renderer {
     /// Put a square icon in a slot (reusing the slot drawn longest ago when
     /// all are taken); returns its uv. `None` when every slot is already
     /// drawn this frame.
-    pub fn icon(&mut self, gl: &glow::Context, key: &str, rgba: &[u8], w: u32, h: u32) -> Option<[f32; 4]> {
+    pub fn icon(&mut self, gl: &Gpu, key: &str, rgba: &[u8], w: u32, h: u32) -> Option<[f32; 4]> {
         if w != h || rgba.len() != (w * h * 4) as usize {
             log::warn!("icon {key}: not a square RGBA image ({w}x{h})");
             return None;
@@ -296,14 +328,7 @@ impl Renderer {
         let Some((x, y)) = slots.insert(key) else {
             return None;
         };
-        unsafe {
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.icons.tex));
-            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-            gl.tex_sub_image_2d(
-                glow::TEXTURE_2D, 0, x as i32, y as i32, w as i32, h as i32, glow::RGBA,
-                glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(rgba)),
-            );
-        }
+        upload(gl, self.gl.as_ref(), AtlasId::Icons, (x, y), w, h, rgba);
         Some(self.slot_uv((x, y), w))
     }
 
@@ -337,7 +362,7 @@ impl Renderer {
     /// Lay out one line at an Android-style em size and queue its glyphs.
     /// Returns the laid-out width.
     #[allow(clippy::too_many_arguments)]
-    pub fn text(&mut self, gl: &glow::Context, batch: &mut Batch, s: &str, x: f32, baseline: f32, em_px: f32, max_w: f32, color: Rgba, weight: Weight) -> f32 {
+    pub fn text(&mut self, gl: &Gpu, batch: &mut Batch, s: &str, x: f32, baseline: f32, em_px: f32, max_w: f32, color: Rgba, weight: Weight) -> f32 {
         self.text_spaced(gl, batch, s, x, baseline, em_px, 0.0, max_w, color, weight)
     }
 
@@ -345,7 +370,7 @@ impl Renderer {
     #[allow(clippy::too_many_arguments)]
     pub fn text_spaced(
         &mut self,
-        gl: &glow::Context,
+        gl: &Gpu,
         batch: &mut Batch,
         s: &str,
         x: f32,
@@ -370,7 +395,8 @@ impl Renderer {
                     let fonts = self.fonts[weight as usize].as_ref().expect("loaded above");
                     let slot = match fonts.raster(c, px) {
                         None => Some(None),
-                        Some(g) => self.glyphs.put(gl, g.w, g.h, glow::RED, &g.coverage).map(|uv| {
+                        Some(g) => self.glyphs.alloc(g.w, g.h).map(|(at, uv)| {
+                            upload(gl, self.gl.as_ref(), AtlasId::Glyphs, at, g.w, g.h, &g.coverage);
                             Some(GlyphSlot { uv, w: g.w as f32, h: g.h as f32, left: g.left, top: g.top })
                         }),
                     };
@@ -395,27 +421,36 @@ impl Renderer {
         line.width + spacing_px * line.glyphs.len().saturating_sub(1) as f32
     }
 
-    pub fn draw(&mut self, gl: &glow::Context, batch: &Batch, screen: (i32, i32)) {
+    pub fn draw(&mut self, gpu: &Gpu, batch: &Batch, screen: (i32, i32)) {
         let items = batch.instances();
-        unsafe {
-            gl.viewport(0, 0, screen.0, screen.1);
-            gl.clear_color(0.0, 0.0, 0.0, 0.0);
-            gl.clear(glow::COLOR_BUFFER_BIT);
-            if items.is_empty() {
-                return;
+        match gpu {
+            Gpu::Vk(v) => {
+                if let Err(e) = v.borrow_mut().draw(bytemuck::cast_slice(items), items.len() as u32, screen) {
+                    log::error!("vulkan draw: {e}");
+                }
             }
-            gl.use_program(Some(self.program));
-            gl.uniform_2_f32(self.u_screen.as_ref(), screen.0 as f32, screen.1 as f32);
-            gl.bind_vertex_array(Some(self.vao));
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
-            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytemuck::cast_slice(items), glow::STREAM_DRAW);
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.icons.tex));
-            gl.active_texture(glow::TEXTURE1);
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.glyphs.tex));
-            gl.enable(glow::BLEND);
-            gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
-            gl.draw_arrays_instanced(glow::TRIANGLE_STRIP, 0, 4, items.len() as i32);
+            Gpu::Gl(g) => {
+                let (Some(p), gl) = (self.gl.as_ref(), g.gl()) else { return };
+                unsafe {
+                    gl.viewport(0, 0, screen.0, screen.1);
+                    gl.clear_color(0.0, 0.0, 0.0, 0.0);
+                    gl.clear(glow::COLOR_BUFFER_BIT);
+                    if !items.is_empty() {
+                        gl.use_program(Some(p.program));
+                        gl.uniform_2_f32(p.u_screen.as_ref(), screen.0 as f32, screen.1 as f32);
+                        gl.bind_vertex_array(Some(p.vao));
+                        gl.bind_buffer(glow::ARRAY_BUFFER, Some(p.vbo));
+                        gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytemuck::cast_slice(items), glow::STREAM_DRAW);
+                        gl.active_texture(glow::TEXTURE0);
+                        gl.bind_texture(glow::TEXTURE_2D, Some(p.icon_tex));
+                        gl.active_texture(glow::TEXTURE1);
+                        gl.bind_texture(glow::TEXTURE_2D, Some(p.glyph_tex));
+                        gl.enable(glow::BLEND);
+                        gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+                        gl.draw_arrays_instanced(glow::TRIANGLE_STRIP, 0, 4, items.len() as i32);
+                    }
+                }
+            }
         }
         if self.last_log.elapsed() >= Duration::from_secs(5) {
             log::info!("draw calls: 1, instances: {}", items.len());

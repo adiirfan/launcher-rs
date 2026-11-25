@@ -456,7 +456,7 @@ impl Drawer {
 
     /// Build the list's part of the frame. Returns true while anything moves.
     #[allow(clippy::too_many_arguments)]
-    pub fn draw(&mut self, gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, icons: &mut Icons, apps: (&[AppRecord], u64), dots: Option<&HashSet<String>>, screen: (i32, i32), insets: Insets, now: Instant) -> bool {
+    pub fn draw(&mut self, gl: &crate::gpu::Gpu, r: &mut Renderer, batch: &mut Batch, icons: &mut Icons, apps: (&[AppRecord], u64), dots: Option<&HashSet<String>>, screen: (i32, i32), insets: Insets, now: Instant) -> bool {
         let p = self.progress(now);
         if let Some(s) = self.slide
             && now >= s.start + s.dur
