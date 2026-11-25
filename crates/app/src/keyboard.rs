@@ -136,6 +136,26 @@ pub extern "system" fn Java_dev_launcherrs_app_MainActivity_onTrim<'l>(_env: Env
     wake();
 }
 
+/// System bar sizes in pixels (top, bottom, left, right), as Android last reported them.
+static INSETS: Mutex<Option<[i32; 4]>> = Mutex::new(None);
+
+pub fn bar_insets() -> Option<[i32; 4]> {
+    *INSETS.lock().unwrap()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_launcherrs_app_MainActivity_onInsets<'l>(
+    _env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    top: jint,
+    bottom: jint,
+    left: jint,
+    right: jint,
+) {
+    *INSETS.lock().unwrap() = Some([top, bottom, left, right]);
+    wake();
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_launcherrs_app_MainActivity_onHome<'l>(_env: EnvUnowned<'l>, _class: JClass<'l>) {
     *HOME.lock().unwrap() = true;

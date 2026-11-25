@@ -89,6 +89,7 @@ fn android_main(app: AndroidApp) {
     let mut policy = RefreshPolicy::new();
     let mut vote = RateVote::Idle;
     let frame_rate = refresh::FrameRate::new(&app);
+    icons.set_frame_budget(Duration::from_nanos(frame_rate.period_ns() as u64 / 5));
     let vsync = vsync::Vsync::new();
     if vsync.is_none() {
         log::warn!("no refresh callbacks; drawing on a timer");
@@ -291,7 +292,9 @@ fn android_main(app: AndroidApp) {
             }
             if let Some(g) = gfx.as_ref().filter(|g| g.has_surface()) {
                 let r = renderer.get_or_insert_with(|| {
-                    Renderer::new(g.gl())
+                    let mut r = Renderer::new(g.gl());
+                    r.set_glyph_budget(Duration::from_nanos(frame_rate.period_ns() as u64 / 5));
+                    r
                 });
                 let t0 = Instant::now();
                 r.begin_frame();
@@ -320,14 +323,17 @@ fn android_main(app: AndroidApp) {
                 }
                 // Something kept moving, yet a refresh went by with no frame.
                 if let (Some(t), Some(prev)) = (tick, moving_tick)
-                    && t - prev > 25_000_000
+                    && t - prev > frame_rate.period_ns() * 3 / 2
                 {
                     log::info!("slow beat: {:.1} ms between moving frames", (t - prev) as f64 / 1e6);
                 }
-                // Done later than one refresh after its own: shown a refresh late.
-                if let Some(t) = tick {
+                // Mid-movement and done later than one refresh after its
+                // own: shown a refresh late. (The first frame after idle is
+                // left out: on screens that slow right down when still, its
+                // refresh time says little.)
+                if let Some(t) = tick.filter(|_| moving_tick.is_some()) {
                     let late = monotonic_ns(libc::CLOCK_MONOTONIC) - t;
-                    if late > 16_700_000 {
+                    if late > frame_rate.period_ns() {
                         log::info!("slow beat: frame done {:.1} ms after its refresh", late as f64 / 1e6);
                     }
                 }
@@ -375,7 +381,9 @@ fn android_main(app: AndroidApp) {
                     r.load_fonts();
                     let screen = g.size();
                     let ins = insets(&app, screen, &mut last_insets);
+                    let budget = r.set_glyph_budget(Duration::MAX);
                     settings.warm(g.gl(), r, &mut icons, &home, screen, ins, now);
+                    r.set_glyph_budget(budget);
                     log::info!("fonts and settings text ready in {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
                 }
                 let keys = home.apps().0.iter().map(|a| &a.key);
@@ -429,6 +437,11 @@ fn insets(app: &AndroidApp, (w, h): (i32, i32), last: &mut Option<Insets>) -> In
     let d = app.config().density().unwrap_or(160) as f32 / 160.0;
     let r = app.content_rect();
     let fallback = Insets { top: 24.0 * d, bottom: 48.0 * d, left: 0.0, right: 0.0 };
+    if let Some([top, bottom, left, right]) = keyboard::bar_insets() {
+        let ins = Insets { top: top as f32, bottom: bottom as f32, left: left as f32, right: right as f32 };
+        *last = Some(ins);
+        return ins;
+    }
     if r.right <= r.left || r.bottom <= r.top {
         return last.unwrap_or(fallback);
     }

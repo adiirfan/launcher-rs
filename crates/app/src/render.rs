@@ -165,6 +165,8 @@ pub struct Renderer {
     /// Time spent this frame rasterising new glyphs and loading font weights.
     pub spent_glyphs: Duration,
     pub spent_fonts: Duration,
+    /// Letter drawing allowed per frame; a line needing more waits a frame.
+    glyph_budget: Duration,
 }
 
 impl Renderer {
@@ -214,8 +216,14 @@ impl Renderer {
                 redraw: false,
                 spent_glyphs: Duration::ZERO,
                 spent_fonts: Duration::ZERO,
+                glyph_budget: Duration::from_millis(3),
             }
         }
+    }
+
+    /// Returns the old budget, so a caller can lift it for a while.
+    pub fn set_glyph_budget(&mut self, budget: Duration) -> Duration {
+        std::mem::replace(&mut self.glyph_budget, budget)
     }
 
     /// Load every font weight now, so none is first loaded mid-movement.
@@ -361,6 +369,14 @@ impl Renderer {
         let px = fonts.px_for_em(em_px);
         let line = layout_line(s, px, max_w, fonts);
         let size_key = (px * 2.0).round() as u32;
+        let width = line.width + spacing_px * line.glyphs.len().saturating_sub(1) as f32;
+        // Out of time this frame and this line needs new letters: next frame.
+        if self.spent_glyphs >= self.glyph_budget
+            && line.glyphs.iter().any(|&(c, _)| !self.glyph_keys.contains_key(&(c, size_key, weight)))
+        {
+            self.redraw = true;
+            return width;
+        }
         for (n, &(c, gx)) in line.glyphs.iter().enumerate() {
             let key = (c, size_key, weight);
             let slot = match self.glyph_keys.get(&key) {

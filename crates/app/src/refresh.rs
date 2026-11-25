@@ -43,6 +43,12 @@ impl FrameRate {
         FrameRate { set, max_hz }
     }
 
+    /// One refresh at the screen's top rate, in nanoseconds: the time a
+    /// frame has while something moves (the launcher asks for the top rate).
+    pub fn period_ns(&self) -> i64 {
+        (1e9 / self.max_hz.max(1.0)) as i64
+    }
+
     pub fn apply(&self, window: &NativeWindow, vote: RateVote) {
         let Some(set) = self.set else { return };
         let hz = match vote {
