@@ -49,6 +49,7 @@ pub struct Pager {
     drag: Option<Drag>,
     snap: Option<Snap>,
     velocity: Velocity,
+    snap_time: Duration,
 }
 
 impl Pager {
@@ -57,7 +58,7 @@ impl Pager {
     }
 
     pub fn new_with_slop(pages: usize, page_w: f32, slop_px: f32) -> Pager {
-        Pager { pages: pages.max(1), page_w, slop: slop_px, page: 0, drag: None, snap: None, velocity: Velocity::new() }
+        Pager { pages: pages.max(1), page_w, slop: slop_px, page: 0, drag: None, snap: None, velocity: Velocity::new(), snap_time: SNAP }
     }
 
     pub fn set_pages(&mut self, n: usize) {
@@ -66,6 +67,11 @@ impl Pager {
             self.page = self.pages - 1;
             self.snap = None;
         }
+    }
+
+    /// How long a slide to a page takes (zero: it jumps).
+    pub fn set_snap(&mut self, d: Duration) {
+        self.snap_time = d;
     }
 
     pub fn set_width(&mut self, w: f32) {
@@ -92,7 +98,7 @@ impl Pager {
     }
 
     pub fn animating(&self, now: Instant) -> bool {
-        self.snap.is_some_and(|s| now < s.start + SNAP)
+        self.snap.is_some_and(|s| now < s.start + self.snap_time)
     }
 
     fn max_offset(&self) -> f32 {
@@ -116,8 +122,8 @@ impl Pager {
             };
         }
         match self.snap {
-            Some(s) if now < s.start + SNAP => {
-                let t = (now - s.start).as_secs_f32() / SNAP.as_secs_f32();
+            Some(s) if now < s.start + self.snap_time => {
+                let t = (now - s.start).as_secs_f32() / self.snap_time.as_secs_f32();
                 let e = 1.0 - (1.0 - t).powi(3);
                 s.from + (rest - s.from) * e
             }
@@ -288,6 +294,19 @@ mod tests {
         p.touch_move(720.0, 500.0, ms(t0, 40));
         p.touch_up(720.0, 500.0, ms(t0, 48));
         assert_eq!(p.page(), 1);
+    }
+
+    #[test]
+    fn zero_snap_time_jumps() {
+        let t0 = Instant::now();
+        let mut p = Pager::new(3, W);
+        p.set_snap(Duration::ZERO);
+        p.snap_to(2, t0);
+        assert!(!p.animating(t0));
+        assert_eq!(p.offset(t0), 2.0 * W);
+        p.set_snap(Duration::from_millis(400));
+        p.snap_to(0, t0);
+        assert!(p.animating(ms(t0, 300)));
     }
 
     #[test]
