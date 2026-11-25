@@ -70,3 +70,4 @@ mod tests {
         assert!(!r.contains(9.9, 10.0));
     }
 }
+pub mod slots;
