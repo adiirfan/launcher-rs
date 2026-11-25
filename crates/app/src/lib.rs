@@ -7,13 +7,12 @@ mod jni_util;
 mod apps;
 mod fonts;
 mod refresh;
+mod keyboard;
 
 use std::time::{Duration, Instant};
 
-use android_activity::input::{
-    ImeOptions, InputEvent, InputType, KeyAction, Keycode, MotionAction, TextInputAction,
-    TextInputState,
-};
+use android_activity::input::{InputEvent, KeyAction, Keycode, MotionAction};
+use launcher_core::ime::ImeState;
 use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
 use launcher_core::frame::FrameScheduler;
 use launcher_core::refresh::{RateVote, RefreshPolicy};
@@ -35,6 +34,7 @@ fn android_main(app: AndroidApp) {
     );
     log::info!("android_main start");
     return_freed_memory_quickly();
+    keyboard::init(&app);
 
     let mut sched = FrameScheduler::new();
     let mut gfx: Option<GlSurface> = None;
@@ -103,20 +103,18 @@ fn android_main(app: AndroidApp) {
                 // Empty space: force a redraw (used to time frames).
                 sched.request_redraw();
             } else {
-                app.set_ime_editor_info(
-                    InputType::TYPE_CLASS_TEXT | InputType::TYPE_TEXT_VARIATION_NORMAL,
-                    TextInputAction::Search,
-                    ImeOptions::IME_FLAG_NO_FULLSCREEN,
-                );
-                app.show_soft_input(true);
+                keyboard::show(&app, true);
             }
         }
         if input.back {
-            app.hide_soft_input(true);
+            keyboard::show(&app, false);
         }
-        if let Some(state) = input.text {
+        if let Some(state) = keyboard::take() {
             on_text(&state);
             sched.request_redraw();
+        }
+        if keyboard::take_action() {
+            log::info!("action");
         }
 
         let now = Instant::now();
@@ -174,7 +172,6 @@ struct InputOut {
     touched: bool,
     tap: Option<(f32, f32)>,
     back: bool,
-    text: Option<TextInputState>,
 }
 
 /// Input must always be consumed or Android reports the app as frozen.
@@ -198,23 +195,14 @@ fn drain_input(app: &AndroidApp) -> InputOut {
             }
             InputStatus::Handled
         }
-        InputEvent::TextEvent(state) => {
-            out.text = Some(state.clone());
-            InputStatus::Handled
-        }
         _ => InputStatus::Unhandled,
     }) {}
     out
 }
 
-fn on_text(state: &TextInputState) {
-    let compose = state
-        .compose_region
-        .map_or("none".to_string(), |c| format!("{}..{}", c.start, c.end));
-    log::info!(
-        "text: {:?} sel={}..{} compose={}",
-        state.text, state.selection.start, state.selection.end, compose
-    );
+fn on_text(state: &ImeState) {
+    let compose = state.compose.map_or("none".to_string(), |c| format!("{}..{}", c.0, c.1));
+    log::info!("text: {:?} sel={}..{} compose={}", state.text, state.selection.0, state.selection.1, compose);
 }
 
 /// The drawing-kit check scene: shapes, text and the first 16 apps.
