@@ -1,7 +1,8 @@
 //! App icons for every screen: from the atlas, else from the disk cache,
 //! else asked from Android after the frame (then saved to disk).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use android_activity::AndroidApp;
 use launcher_core::home::AppKey;
@@ -21,7 +22,20 @@ pub struct Icons {
     missing: Vec<AppKey>,
     /// Icons whose app changed: dropped from the atlas next frame.
     stale: Vec<AppKey>,
+    /// Cached icon files held compressed in memory (about 20 KB each), read
+    /// while idle so drawing never waits on storage.
+    bytes: HashMap<AppKey, Vec<u8>>,
+    /// Keys whose file isn't there (Android must be asked instead).
+    no_file: HashSet<AppKey>,
+    /// Time spent this frame putting icons into the atlas, and how many.
+    pub spent: Duration,
+    pub decoded: u32,
+    /// An icon was left as a placeholder to keep this frame on time.
+    deferred: bool,
 }
+
+/// Icon work allowed per frame; the rest waits for the next frame.
+const FRAME_BUDGET: Duration = Duration::from_millis(3);
 
 fn atlas_key(key: &AppKey) -> String {
     format!("{}/{}", key.package, key.activity)
@@ -29,7 +43,8 @@ fn atlas_key(key: &AppKey) -> String {
 
 impl Icons {
     pub fn new(store: Store) -> Icons {
-        Icons { store, size: 0, failed: HashSet::new(), missing: Vec::new(), stale: Vec::new() }
+        Icons { store, size: 0, failed: HashSet::new(), missing: Vec::new(), stale: Vec::new(),
+            bytes: HashMap::new(), no_file: HashSet::new(), spent: Duration::ZERO, decoded: 0, deferred: false }
     }
 
     pub fn size(&self) -> u32 {
@@ -42,6 +57,8 @@ impl Icons {
         if px != self.size {
             self.size = px;
             self.missing.clear();
+            self.bytes.clear();
+            self.no_file.clear();
         }
     }
 
@@ -49,10 +66,15 @@ impl Icons {
     pub fn changed(&mut self, key: &AppKey) {
         self.store.forget_icon(key);
         self.failed.remove(key);
+        self.bytes.remove(key);
+        self.no_file.remove(key);
         self.stale.push(key.clone());
     }
 
     pub fn begin_frame(&mut self, r: &mut Renderer) {
+        self.spent = Duration::ZERO;
+        self.decoded = 0;
+        self.deferred = false;
         for key in self.stale.drain(..) {
             r.forget_icon(&atlas_key(&key));
         }
@@ -66,8 +88,20 @@ impl Icons {
         if self.failed.contains(key) {
             return None;
         }
-        match self.store.load_icon(key, self.size) {
-            Some((px, w, h)) => r.icon(gl, &ak, &px, w, h),
+        if self.spent >= FRAME_BUDGET {
+            self.deferred = true;
+            return None;
+        }
+        let t = Instant::now();
+        if !self.bytes.contains_key(key) && !self.no_file.contains(key) {
+            self.read_file(key);
+        }
+        let loaded = self.bytes.get(key).and_then(|b| Store::decode_icon(b, self.size));
+        let uv = loaded.as_ref().and_then(|(px, w, h)| r.icon(gl, &ak, px, *w, *h));
+        self.spent += t.elapsed();
+        self.decoded += 1;
+        match loaded {
+            Some(_) => uv,
             None => {
                 if !self.missing.contains(key) {
                     self.missing.push(key.clone());
@@ -101,17 +135,62 @@ impl Icons {
         !self.missing.is_empty()
     }
 
-    /// Fetch icons that weren't on disk and save them. True if any were tried.
+    /// Ask Android for one missing icon and save it. Each takes 10-60 ms,
+    /// so one per call, and only while nothing moves. True if one was tried.
     pub fn load_missing(&mut self, app: &AndroidApp) -> bool {
-        let missing = std::mem::take(&mut self.missing);
-        for key in &missing {
-            match apps::load_icon_rgba(app, key, self.size as i32) {
-                Some((px, w, _)) => self.store.save_icon(key, w as u32, &px),
-                None => {
-                    self.failed.insert(key.clone());
-                }
+        let Some(key) = self.missing.pop() else { return false };
+        match apps::load_icon_rgba(app, &key, self.size as i32) {
+            Some((px, w, _)) => {
+                self.store.save_icon(&key, w as u32, &px);
+                // Any copy held is the old (unusable) file: read the new one.
+                self.bytes.remove(&key);
+                self.no_file.remove(&key);
+            }
+            None => {
+                self.failed.insert(key);
             }
         }
-        !missing.is_empty()
+        true
+    }
+
+    fn read_file(&mut self, key: &AppKey) {
+        match self.store.read_icon(key) {
+            Some(b) => {
+                self.bytes.insert(key.clone(), b);
+            }
+            None => {
+                self.no_file.insert(key.clone());
+            }
+        }
+    }
+
+    /// True when an icon was left as a placeholder to stay on time.
+    pub fn deferred(&self) -> bool {
+        self.deferred
+    }
+
+    /// Read cached icon files into memory until `budget` is used. True while
+    /// some are left. Call only while nothing moves.
+    pub fn warm<'a>(&mut self, apps: impl IntoIterator<Item = &'a AppKey>, budget: Duration) -> bool {
+        if self.size == 0 {
+            return false;
+        }
+        let t = Instant::now();
+        for key in apps {
+            if self.bytes.contains_key(key) || self.no_file.contains(key) || self.failed.contains(key) {
+                continue;
+            }
+            if t.elapsed() >= budget {
+                return true;
+            }
+            self.read_file(key);
+        }
+        false
+    }
+
+    /// Give back the compressed copies; they're read again when needed.
+    pub fn trim(&mut self) {
+        self.bytes = HashMap::new();
+        self.no_file = HashSet::new();
     }
 }

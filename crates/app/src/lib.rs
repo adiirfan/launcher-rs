@@ -21,6 +21,7 @@ mod refresh;
 mod keyboard;
 mod listener;
 mod system;
+mod vsync;
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -40,16 +41,29 @@ use render::Renderer;
 use settings_screen::SettingsScreen;
 
 const REPORT_EVERY: Duration = Duration::from_secs(5);
+/// Work longer than this risks missing the screen's next refresh.
+const SLOW: Duration = Duration::from_millis(8);
 /// How long a frame stays "animating" after the pager says it's moving.
 const ANIM_STEP: Duration = Duration::from_millis(20);
+/// If the screen's refresh call never comes (window going away), draw anyway.
+const VSYNC_FALLBACK: Duration = Duration::from_millis(50);
+
+fn slow_step(what: &str, since: Instant) {
+    let took = since.elapsed();
+    if took > SLOW {
+        log::info!("slow step: {what} {:.1} ms", took.as_secs_f64() * 1e3);
+    }
+}
 
 #[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {
-    android_logger::init_once(
-        android_logger::Config::default()
-            .with_max_level(log::LevelFilter::Info)
-            .with_tag("launcher"),
+    let level = log_level();
+    let logger = android_logger::AndroidLogger::new(
+        android_logger::Config::default().with_max_level(level).with_tag("launcher"),
     );
+    if log::set_logger(Box::leak(Box::new(QuietLogger(logger)))).is_ok() {
+        log::set_max_level(level);
+    }
     log::info!("android_main start, {:.0} ms after process start", ms_since_process_start());
     return_freed_memory_quickly();
     keyboard::init(&app);
@@ -75,6 +89,18 @@ fn android_main(app: AndroidApp) {
     let mut policy = RefreshPolicy::new();
     let mut vote = RateVote::Idle;
     let frame_rate = refresh::FrameRate::new(&app);
+    let vsync = vsync::Vsync::new();
+    if vsync.is_none() {
+        log::warn!("no refresh callbacks; drawing on a timer");
+    }
+    // When the current wait for a refresh began.
+    let mut waiting_since: Option<Instant> = None;
+    // Fonts and the settings screen's letters are ready (redone after a trim).
+    let mut warmed = false;
+    // Idle-time loading is still under way: come straight back for more.
+    let mut background = false;
+    // The refresh the last frame was drawn for, while something was moving.
+    let mut moving_tick: Option<i64> = None;
 
     while !quit {
         let now = Instant::now();
@@ -82,7 +108,15 @@ fn android_main(app: AndroidApp) {
         if visible {
             timeout = timeout.min(until_next_minute());
         }
-        let timeout = [sched.next_wake(now), policy.next_check(now), home.next_wake(now), drawer.next_wake(now)]
+        let frame_wake = match &vsync {
+            Some(v) if sched.should_draw(now) => {
+                v.request();
+                let since = *waiting_since.get_or_insert(now);
+                Some(VSYNC_FALLBACK.saturating_sub(now.duration_since(since)))
+            }
+            _ => sched.next_wake(now),
+        };
+        let timeout = [frame_wake, background.then_some(Duration::ZERO), policy.next_check(now), home.next_wake(now), drawer.next_wake(now)]
             .into_iter()
             .flatten()
             .fold(timeout, Duration::min);
@@ -212,6 +246,21 @@ fn android_main(app: AndroidApp) {
             sched.request_redraw();
         }
 
+        // Android wants memory back while another app is in front (20 is
+        // "UI hidden"). Home's icons stay, so pressing Home is still instant.
+        if let Some(level) = keyboard::take_trim() {
+            log::info!("trim memory level {level}, visible {visible}");
+            if level >= 20 && !visible {
+                drawer.trim();
+                icons.trim();
+                warmed = false;
+                if let Some(r) = renderer.as_mut() {
+                    r.trim_glyphs();
+                }
+                purge_freed_memory();
+            }
+        }
+
         let m = current_minute();
         if m != minute {
             minute = m;
@@ -227,7 +276,17 @@ fn android_main(app: AndroidApp) {
         }
 
         let now = Instant::now();
-        if sched.should_draw(now) {
+        // A refresh that came while nothing needed drawing is simply dropped.
+        let tick = vsync.as_ref().and_then(|v| v.take_tick());
+        let on_beat = vsync.is_none()
+            || tick.is_some()
+            || waiting_since.is_some_and(|t| now.duration_since(t) >= VSYNC_FALLBACK);
+        if sched.should_draw(now) && on_beat {
+            waiting_since = None;
+            // Ask for the next refresh now, so a long frame can't lose it.
+            if let Some(v) = vsync.as_ref().filter(|_| sched.is_animating()) {
+                v.request();
+            }
             if let Some(g) = gfx.as_ref().filter(|g| g.has_surface()) {
                 let r = renderer.get_or_insert_with(|| {
                     Renderer::new(g.gl())
@@ -244,9 +303,31 @@ fn android_main(app: AndroidApp) {
                 }
                 moving |= drawer.draw(g.gl(), r, &mut batch, &mut icons, home.apps(), home.dots(), screen, ins, now);
                 moving |= settings.draw(g.gl(), r, &mut batch, &mut icons, &home, screen, ins, now);
+                let built = t0.elapsed();
                 r.draw(g.gl(), &batch, screen);
+                let submitted = t0.elapsed();
+                if submitted > SLOW {
+                    let ms = |d: Duration| d.as_secs_f64() * 1e3;
+                    log::info!(
+                        "slow frame: build {:.1} ms (icons {} in {:.1}, glyphs {:.1}, fonts {:.1}), submit {:.1} ms",
+                        ms(built), icons.decoded, ms(icons.spent), ms(r.spent_glyphs), ms(r.spent_fonts), ms(submitted - built)
+                    );
+                }
                 if let Err(e) = g.swap() {
                     log::error!("swap failed: {e}");
+                }
+                // Something kept moving, yet a refresh went by with no frame.
+                if let (Some(t), Some(prev)) = (tick, moving_tick)
+                    && t - prev > 25_000_000
+                {
+                    log::info!("slow beat: {:.1} ms between moving frames", (t - prev) as f64 / 1e6);
+                }
+                // Done later than one refresh after its own: shown a refresh late.
+                if let Some(t) = tick {
+                    let late = monotonic_ns(libc::CLOCK_MONOTONIC) - t;
+                    if late > 16_700_000 {
+                        log::info!("slow beat: frame done {:.1} ms after its refresh", late as f64 / 1e6);
+                    }
                 }
                 timings.push(t0.elapsed());
                 if timings.len() == 10 {
@@ -264,22 +345,43 @@ fn android_main(app: AndroidApp) {
                 if moving {
                     sched.animate_until(now + ANIM_STEP);
                 }
-                if r.wants_redraw() {
+                if r.wants_redraw() || icons.deferred() {
                     sched.request_redraw();
                 }
                 frames += 1;
             }
             sched.frame_drawn(now);
+            // Still moving after this frame: the next one is due next refresh.
+            moving_tick = tick.filter(|_| sched.is_animating());
         }
 
         // Slow work goes after a frame is on screen, never before.
         if !first_frame {
-            if icons.has_missing() && icons.load_missing(&app) {
-                sched.request_redraw();
+            // Loading ahead, only while nothing moves and the launcher is in front.
+            background = false;
+            if visible && !sched.should_draw(now) && !sched.is_animating() {
+                if icons.load_missing(&app) {
+                    sched.request_redraw();
+                }
+                if !warmed
+                    && let (Some(g), Some(r)) = (gfx.as_ref().filter(|g| g.has_surface()), renderer.as_mut())
+                {
+                    warmed = true;
+                    let t = Instant::now();
+                    r.load_fonts();
+                    let screen = g.size();
+                    let ins = insets(&app, screen, &mut last_insets);
+                    settings.warm(g.gl(), r, &mut icons, &home, screen, ins, now);
+                    log::info!("fonts and settings text ready in {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+                }
+                let keys = home.apps().0.iter().map(|a| &a.key);
+                background = icons.warm(keys, Duration::from_millis(4)) || icons.has_missing();
             }
+            let t = Instant::now();
             if drawer.after_frame(&app) {
                 sched.request_redraw();
             }
+            slow_step("list lookups", t);
             if needs_refresh {
                 needs_refresh = false;
                 if home.refresh(&app, &mut icons) {
@@ -337,6 +439,42 @@ fn insets(app: &AndroidApp, (w, h): (i32, i32), last: &mut Option<Insets>) -> In
     }
     *last = Some(ins);
     ins
+}
+
+unsafe extern "C" {
+    fn __system_property_get(name: *const libc::c_char, value: *mut libc::c_char) -> libc::c_int;
+}
+
+/// Drops one message: android-activity reports every refresh call as
+/// "spurious", which would fill the log 60 times a second while moving.
+struct QuietLogger(android_logger::AndroidLogger);
+
+impl log::Log for QuietLogger {
+    fn enabled(&self, m: &log::Metadata) -> bool {
+        self.0.enabled(m)
+    }
+    fn log(&self, r: &log::Record) {
+        let spurious = r.target().starts_with("android_activity")
+            && r.args().as_str().is_some_and(|s| s.starts_with("Spurious ALOOPER_POLL_CALLBACK"));
+        if !spurious {
+            self.0.log(r);
+        }
+    }
+    fn flush(&self) {
+        self.0.flush();
+    }
+}
+
+/// Warnings only, unless `adb shell setprop debug.launcherrs.log info`
+/// (or `debug`) asks for more. Read once at start.
+fn log_level() -> log::LevelFilter {
+    let mut value = [0u8; 92];
+    let n = unsafe { __system_property_get(c"debug.launcherrs.log".as_ptr(), value.as_mut_ptr().cast()) };
+    match &value[..n.clamp(0, 91) as usize] {
+        b"info" => log::LevelFilter::Info,
+        b"debug" => log::LevelFilter::Debug,
+        _ => log::LevelFilter::Warn,
+    }
 }
 
 fn current_minute() -> u64 {

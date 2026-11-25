@@ -17,7 +17,14 @@ android {
     }
 
     buildTypes {
-        release { isMinifyEnabled = false }
+        release {
+            // Shrink the Java side; keep rules protect what Rust calls by name.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // Signed with the local debug key, for testing on our phones.
+            signingConfig = signingConfigs.getByName("debug")
+        }
     }
 
     compileOptions {

@@ -15,6 +15,7 @@ static LATEST: Mutex<Option<ImeState>> = Mutex::new(None);
 static ACTION: Mutex<bool> = Mutex::new(false);
 static HOME: Mutex<bool> = Mutex::new(false);
 static PERMISSION: Mutex<Option<(i32, bool)>> = Mutex::new(None);
+static TRIM: Mutex<Option<i32>> = Mutex::new(None);
 static WAKER: OnceLock<AndroidAppWaker> = OnceLock::new();
 
 /// Call once at start so keyboard events can wake the main loop.
@@ -72,6 +73,11 @@ pub fn take_home() -> bool {
     std::mem::take(&mut *HOME.lock().unwrap())
 }
 
+/// The highest memory-trim level Android asked for since the last call.
+pub fn take_trim() -> Option<i32> {
+    TRIM.lock().unwrap().take()
+}
+
 /// The answer to the last permission request (its code, and yes or no), once.
 pub fn take_permission() -> Option<(i32, bool)> {
     PERMISSION.lock().unwrap().take()
@@ -119,6 +125,14 @@ pub extern "system" fn Java_dev_launcherrs_app_MainActivity_onAction<'l>(
     _class: JClass<'l>,
 ) {
     *ACTION.lock().unwrap() = true;
+    wake();
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_launcherrs_app_MainActivity_onTrim<'l>(_env: EnvUnowned<'l>, _class: JClass<'l>, level: jint) {
+    let mut t = TRIM.lock().unwrap();
+    *t = Some(t.map_or(level, |old| old.max(level)));
+    drop(t);
     wake();
 }
 
