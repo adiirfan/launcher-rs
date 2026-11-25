@@ -92,11 +92,15 @@ pub struct Settings {
     pub animations: Speed,
     /// A glow at the end of a list pushed past its end.
     pub glow: bool,
+    /// The next calendar event under the date.
+    pub events: bool,
+    /// Music controls under the date while something plays.
+    pub music: bool,
 }
 
 impl Default for Settings {
     fn default() -> Settings {
-        Settings { accent: Accent::Blue, labels: true, add_new_apps: false, dots: true, animations: Speed::Quick, glow: true }
+        Settings { accent: Accent::Blue, labels: true, add_new_apps: false, dots: true, animations: Speed::Quick, glow: true, events: false, music: true }
     }
 }
 
@@ -115,13 +119,15 @@ fn parse_on_off(v: &str) -> Option<bool> {
 impl Settings {
     pub fn to_text(&self) -> String {
         format!(
-            "set accent {}\nset labels {}\nset add_new_apps {}\nset dots {}\nset animations {}\nset glow {}\n",
+            "set accent {}\nset labels {}\nset add_new_apps {}\nset dots {}\nset animations {}\nset glow {}\nset events {}\nset music {}\n",
             self.accent.word(),
             on_off(self.labels),
             on_off(self.add_new_apps),
             on_off(self.dots),
             self.animations.word(),
             on_off(self.glow),
+            on_off(self.events),
+            on_off(self.music),
         )
     }
 
@@ -147,6 +153,8 @@ impl Settings {
                 "add_new_apps" => out.add_new_apps = parse_on_off(value).unwrap_or(out.add_new_apps),
                 "dots" => out.dots = parse_on_off(value).unwrap_or(out.dots),
                 "glow" => out.glow = parse_on_off(value).unwrap_or(out.glow),
+                "events" => out.events = parse_on_off(value).unwrap_or(out.events),
+                "music" => out.music = parse_on_off(value).unwrap_or(out.music),
                 _ => {}
             }
         }
@@ -163,6 +171,7 @@ mod tests {
         let s = Settings::default();
         assert_eq!(s.accent, Accent::Blue);
         assert!(s.labels && !s.add_new_apps && s.dots && s.glow);
+        assert!(!s.events && s.music);
         assert_eq!(s.animations, Speed::Quick);
         assert_eq!(Accent::Blue.rgb(), 0x33B5E5);
         assert_eq!(Accent::Purple.rgb(), 0xAA66CC);
@@ -173,7 +182,7 @@ mod tests {
 
     #[test]
     fn round_trip_every_field() {
-        let s = Settings { accent: Accent::Orange, labels: false, add_new_apps: true, dots: false, animations: Speed::Off, glow: false };
+        let s = Settings { accent: Accent::Orange, labels: false, add_new_apps: true, dots: false, animations: Speed::Off, glow: false, events: true, music: false };
         let text = format!("v1\ngrid 4 4\n{}slot 0 0 0 a/A\n", s.to_text());
         assert_eq!(Settings::from_text(&text), s);
     }

@@ -654,7 +654,7 @@ impl Home {
         match self.metrics {
             Some((m, s, i)) if s == screen && i == insets => m,
             _ => {
-                let m = HomeMetrics::new(screen.0 as f32, screen.1 as f32, self.density, insets, self.layout.cols, self.layout.rows);
+                let m = HomeMetrics::new(screen.0 as f32, screen.1 as f32, self.density, insets, self.layout.cols, self.layout.rows, false);
                 log::info!("home metrics: icon {:.0}px cell {:.0}x{:.0} insets {:?}", m.icon, m.cell_w, m.cell_h, insets);
                 self.metrics = Some((m, screen, insets));
                 self.pager.set_width(screen.0 as f32);
