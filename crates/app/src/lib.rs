@@ -6,6 +6,7 @@ mod render;
 mod jni_util;
 mod apps;
 mod fonts;
+mod refresh;
 
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,7 @@ use android_activity::input::{
 };
 use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
 use launcher_core::frame::FrameScheduler;
+use launcher_core::refresh::{RateVote, RefreshPolicy};
 
 use gl_surface::GlSurface;
 use apps::AppEntry;
@@ -42,11 +44,17 @@ fn android_main(app: AndroidApp) {
     let mut frames: u32 = 0;
     let mut last_report = Instant::now();
     let mut quit = false;
+    let mut policy = RefreshPolicy::new();
+    let mut vote = RateVote::Idle;
+    let frame_rate = refresh::FrameRate::new(&app);
 
     while !quit {
         let now = Instant::now();
         let to_report = REPORT_EVERY.saturating_sub(now.duration_since(last_report));
-        let timeout = sched.next_wake(now).map_or(to_report, |w| w.min(to_report));
+        let timeout = [sched.next_wake(now), policy.next_check(now)]
+            .into_iter()
+            .flatten()
+            .fold(to_report, Duration::min);
 
         app.poll_events(Some(timeout), |event| {
             if let PollEvent::Main(main) = event {
@@ -61,6 +69,8 @@ fn android_main(app: AndroidApp) {
                                 log::error!("GL setup failed: {e}");
                             }
                             sched.request_redraw();
+                            // A new surface starts with no vote: re-apply ours.
+                            frame_rate.apply(&window, vote);
                         }
                     }
                     MainEvent::TerminateWindow { .. } => {
@@ -80,6 +90,9 @@ fn android_main(app: AndroidApp) {
         });
 
         let input = drain_input(&app);
+        if input.touched {
+            policy.note_activity(Instant::now());
+        }
         if let Some((x, y)) = input.tap {
             log::info!("tap at {x:.0},{y:.0}");
             if let Some(entry) = scene.as_ref().and_then(|s| s.hit(x, y)) {
@@ -129,6 +142,15 @@ fn android_main(app: AndroidApp) {
             }
             sched.frame_drawn(now);
         }
+        if sched.is_animating() {
+            policy.note_activity(now);
+        }
+        if let Some(v) = policy.update(now) {
+            vote = v;
+            if let Some(window) = app.native_window() {
+                frame_rate.apply(&window, vote);
+            }
+        }
         if now.duration_since(last_report) >= REPORT_EVERY {
             log::info!("frames drawn in last 5s: {frames}");
             frames = 0;
@@ -143,6 +165,8 @@ const KEYBOARD_TAP_ZONE: f32 = 300.0;
 
 #[derive(Default)]
 struct InputOut {
+    /// Any finger down, moving or lifted.
+    touched: bool,
     tap: Option<(f32, f32)>,
     back: bool,
     text: Option<TextInputState>,
@@ -162,6 +186,7 @@ fn drain_input(app: &AndroidApp) -> InputOut {
             InputStatus::Handled
         }
         InputEvent::MotionEvent(m) => {
+            out.touched = true;
             if m.action() == MotionAction::Up {
                 let p = m.pointer_at_index(0);
                 out.tap = Some((p.x(), p.y()));

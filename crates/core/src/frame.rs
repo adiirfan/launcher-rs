@@ -30,6 +30,10 @@ impl FrameScheduler {
         });
     }
 
+    pub fn is_animating(&self) -> bool {
+        self.anim_until.is_some()
+    }
+
     pub fn should_draw(&self, _now: Instant) -> bool {
         self.pending || self.anim_until.is_some()
     }
@@ -90,6 +94,17 @@ mod tests {
         s.frame_drawn(after);
         assert!(!s.should_draw(after));
         assert_eq!(s.next_wake(after), None);
+    }
+
+    #[test]
+    fn reports_animating_only_until_deadline_frame() {
+        let mut s = FrameScheduler::new();
+        let t = Instant::now();
+        assert!(!s.is_animating());
+        s.animate_until(t + Duration::from_millis(50));
+        assert!(s.is_animating());
+        s.frame_drawn(t + Duration::from_millis(60));
+        assert!(!s.is_animating());
     }
 
     #[test]
