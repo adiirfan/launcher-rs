@@ -2,6 +2,8 @@
 
 pub mod anim;
 pub mod atlas;
+pub mod batch;
+pub mod text;
 
 /// A rectangle in pixels, y down.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
