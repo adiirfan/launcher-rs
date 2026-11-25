@@ -7,7 +7,7 @@ use launcher_draw::batch::Batch;
 use launcher_draw::{Rect, Rgba};
 
 use crate::fonts::Weight;
-use crate::holo::{ACCENT, BLACK, PLACEHOLDER, WHITE};
+use crate::holo::{self, BLACK, PLACEHOLDER, WHITE};
 use crate::icons::Icons;
 use crate::menu::{POPUP_BG, POPUP_BORDER, R4};
 use crate::render::Renderer;
@@ -89,8 +89,8 @@ impl Panel {
                 let (shown, color) = if text.is_empty() { (folder.name.as_str(), Rgba::hex(PLACEHOLDER)) } else { (text, Rgba::hex(WHITE)) };
                 let tw = if text.is_empty() { 0.0 } else { r.measure(shown, em, nw, Weight::Light) };
                 r.text(gl, batch, shown, nx, baseline, em, nw, color, Weight::Light);
-                batch.rect(Rect::new(nx + tw + 1.0 * d, ny + 12.0 * d, 2.0 * d, nh - 24.0 * d), Rgba::hex(ACCENT), 0.0);
-                batch.rect(Rect::new(nx, ny + nh - 2.0 * d, nw, 2.0 * d), Rgba::hex(ACCENT), 0.0);
+                batch.rect(Rect::new(nx + tw + 1.0 * d, ny + 12.0 * d, 2.0 * d, nh - 24.0 * d), Rgba::hex(holo::accent()), 0.0);
+                batch.rect(Rect::new(nx, ny + nh - 2.0 * d, nw, 2.0 * d), Rgba::hex(holo::accent()), 0.0);
             }
             None => {
                 r.text(gl, batch, &folder.name, nx, baseline, em, nw, Rgba::hex(WHITE), Weight::Light);

@@ -321,6 +321,19 @@ impl HomeLayout {
         }
     }
 
+    /// Puts each newly installed app on Home, in the first free slot from
+    /// the first page, unless it's hidden or already there. True if any went.
+    pub fn add_new_apps(&mut self, apps: &[AppKey]) -> bool {
+        let mut added = false;
+        for app in apps {
+            if !self.is_hidden(app) && !self.contains(app) {
+                self.put_in_first_free(0, Item::App(app.clone()));
+                added = true;
+            }
+        }
+        added
+    }
+
     pub fn to_text(&self) -> String {
         let mut out = format!("v1\ngrid {} {}\n", self.cols, self.rows);
         for (i, app) in self.dock.iter().enumerate() {
@@ -624,6 +637,18 @@ mod tests {
         assert_eq!(l.take_from_folder(0, 0, 0, 1), Some(k("c")));
         assert_eq!(l.slot(0, 0, 0), Some(&app("a")));
         assert_eq!(l.take_from_folder(0, 0, 0, 0), None);
+    }
+
+    #[test]
+    fn new_apps_fill_free_slots_but_skip_hidden_and_placed() {
+        let mut l = HomeLayout::new(2, 1);
+        l.place(0, 0, 0, k("a"));
+        l.hide(&k("h"));
+        assert!(l.add_new_apps(&[k("a"), k("h"), k("n1"), k("n2")]));
+        assert_eq!(l.slot(0, 1, 0), Some(&app("n1")));
+        assert_eq!(l.slot(1, 0, 0), Some(&app("n2")));
+        assert!(!l.contains(&k("h")));
+        assert!(!l.add_new_apps(&[k("a"), k("n1")]));
     }
 
     #[test]

@@ -10,3 +10,4 @@ pub mod velocity;
 pub mod scroll;
 pub mod drawer_geometry;
 pub mod longpress;
+pub mod settings;

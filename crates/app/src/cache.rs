@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use android_activity::AndroidApp;
 use launcher_core::applist::{self, AppRecord};
 use launcher_core::home::{AppKey, HomeLayout};
+use launcher_core::settings::Settings;
 
 /// Holo icons (two-layer icons cut to a rounded square).
 const ICONS: &str = "icons-holo";
@@ -105,17 +106,19 @@ impl Store {
         let _ = fs::remove_file(self.icon_path(key));
     }
 
-    pub fn load_layout(&self) -> Option<HomeLayout> {
+    /// The home layout and the settings, which share one file.
+    pub fn load_layout(&self) -> Option<(HomeLayout, Settings)> {
         let text = fs::read_to_string(self.data.join("layout.txt")).ok()?;
         let parsed = HomeLayout::from_text(&text);
         if parsed.is_none() {
             log::warn!("cache: layout.txt is broken, starting fresh");
         }
-        parsed
+        Some((parsed?, Settings::from_text(&text)))
     }
 
-    pub fn save_layout(&self, layout: &HomeLayout) {
-        if let Err(e) = write_atomic(&self.data.join("layout.txt"), layout.to_text().as_bytes()) {
+    pub fn save_layout(&self, layout: &HomeLayout, settings: &Settings) {
+        let text = layout.to_text() + &settings.to_text();
+        if let Err(e) = write_atomic(&self.data.join("layout.txt"), text.as_bytes()) {
             log::warn!("cache: saving layout failed: {e}");
         }
     }

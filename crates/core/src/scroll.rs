@@ -153,6 +153,24 @@ impl Scroller {
         self.pos = self.offset(t);
         self.drag = None;
     }
+
+    /// How far past an end the finger is pushing right now: negative while
+    /// pulling down at the top, positive past the bottom, else 0.
+    pub fn overscroll(&self) -> f32 {
+        let Some(d) = self.drag else { return 0.0 };
+        match d.lock {
+            Lock::Pull => -(d.y - d.start_y).max(0.0),
+            Lock::Scroll => {
+                let raw = d.start_pos - (d.y - d.start_y);
+                if raw > self.max {
+                    raw - self.max
+                } else {
+                    raw.min(0.0)
+                }
+            }
+            Lock::Undecided => 0.0,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -167,6 +185,23 @@ mod tests {
         let mut s = Scroller::new(24.0);
         s.set_bounds(1000.0);
         s
+    }
+
+    #[test]
+    fn overscroll_reads_the_push_past_either_end() {
+        let t0 = Instant::now();
+        let mut s = list();
+        assert_eq!(s.overscroll(), 0.0);
+        s.touch_down(100.0, 500.0, t0);
+        s.touch_move(100.0, 700.0, ms(t0, 100));
+        assert_eq!(s.overscroll(), -200.0);
+        s.touch_up(100.0, 700.0, ms(t0, 200));
+        assert_eq!(s.overscroll(), 0.0);
+        s.touch_down(100.0, 1500.0, ms(t0, 300));
+        s.touch_move(100.0, 300.0, ms(t0, 400));
+        assert_eq!(s.overscroll(), 200.0);
+        s.touch_move(100.0, 800.0, ms(t0, 500));
+        assert_eq!(s.overscroll(), 0.0);
     }
 
     #[test]

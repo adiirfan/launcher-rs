@@ -9,7 +9,8 @@ use launcher_core::applist::AppRecord;
 use launcher_core::geometry::{ALL_APPS_SLOT, CLOCK_SP, DOCK_SLOTS, HOLO_COLS, HOLO_ROWS, HomeMetrics, Hit, Insets};
 use launcher_core::home::{AppKey, HomeLayout, Item, Pos};
 use launcher_core::longpress::{LONG_PRESS, LongPress};
-use launcher_core::pager::{Gesture, Pager};
+use launcher_core::pager::{Gesture, Pager, SNAP};
+use launcher_core::settings::Settings;
 use launcher_draw::batch::Batch;
 use launcher_draw::{Rect, Rgba};
 
@@ -17,7 +18,7 @@ use crate::apps::{self, Shortcut};
 use crate::cache::Store;
 use crate::folder::{self, Panel};
 use crate::fonts::Weight;
-use crate::holo::{self, ACCENT, BLACK, WHITE};
+use crate::holo::{self, BLACK, WHITE};
 use crate::icons::Icons;
 use crate::menu::{self, R4, inside};
 use crate::render::Renderer;
@@ -154,6 +155,7 @@ const DATE_SP: f32 = 14.0;
 
 pub struct Home {
     store: Store,
+    settings: Settings,
     layout: HomeLayout,
     /// Every launchable app, A to Z, hidden ones included.
     all_records: Vec<AppRecord>,
@@ -193,20 +195,20 @@ impl Home {
                 (records, seq, Some(boot))
             }
         };
-        let layout = store.load_layout().unwrap_or_else(|| {
+        let (mut layout, settings) = store.load_layout().unwrap_or_else(|| {
             let layout = apps::first_run_layout(app, &records);
-            store.save_layout(&layout);
+            let settings = Settings::default();
+            store.save_layout(&layout, &settings);
             log::info!("first run: dock {:?}", layout.dock.iter().map(|k| k.as_ref().map(|k| k.package.as_str())).collect::<Vec<_>>());
-            layout
+            (layout, settings)
         });
-        let mut layout = layout;
         if layout.reflow(HOLO_COLS, HOLO_ROWS) {
-            store.save_layout(&layout);
+            store.save_layout(&layout, &settings);
             log::info!("layout: reflowed to {HOLO_COLS}x{HOLO_ROWS}, {} page(s)", layout.pages.len());
         }
         let installed: HashSet<AppKey> = records.iter().map(|r| r.key.clone()).collect();
         if layout.remove_missing(&installed) {
-            store.save_layout(&layout);
+            store.save_layout(&layout, &settings);
             log::info!("layout: removed missing apps");
         }
         let labels = records.iter().map(|r| (r.key.clone(), r.label.clone())).collect();
@@ -214,7 +216,10 @@ impl Home {
         let clock = system::clock_text(app).unwrap_or_default();
         log::info!("home loaded in {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
         let visible = visible_records(&records, &layout);
+        let mut pager = pager;
+        apply(&settings, &mut pager);
         Home {
+            settings,
             store,
             layout,
             all_records: records,
@@ -261,12 +266,21 @@ impl Home {
         }
         let installed: HashSet<AppKey> = records.iter().map(|r| r.key.clone()).collect();
         if self.layout.remove_missing(&installed) {
-            self.store.save_layout(&self.layout);
+            self.store.save_layout(&self.layout, &self.settings);
             log::info!("layout: removed missing apps");
             self.pager.set_pages(self.layout.pages.len());
         }
         self.store.save_apps(&records, seq);
         self.store.save_boot(boot);
+        if self.settings.add_new_apps {
+            let known: HashSet<&AppKey> = self.all_records.iter().map(|r| &r.key).collect();
+            let new: Vec<AppKey> = records.iter().filter(|r| !known.contains(&r.key)).map(|r| r.key.clone()).collect();
+            if self.layout.add_new_apps(&new) {
+                self.store.save_layout(&self.layout, &self.settings);
+                self.pager.set_pages(self.layout.pages.len());
+                log::info!("layout: {} new app(s) put on Home", new.len());
+            }
+        }
         self.labels = records.iter().map(|AppRecord { key, label }| (key.clone(), label.clone())).collect();
         self.all_records = records;
         self.rebuild_visible();
@@ -290,6 +304,40 @@ impl Home {
     /// Every launchable app, A to Z, and a number that changes when it does.
     pub fn apps(&self) -> (&[AppRecord], u64) {
         (&self.records, self.records_gen)
+    }
+
+    pub fn settings(&self) -> Settings {
+        self.settings
+    }
+
+    /// Change the settings: they take effect at once and are saved.
+    pub fn set_settings(&mut self, s: Settings) {
+        if s != self.settings {
+            self.settings = s;
+            apply(&s, &mut self.pager);
+            self.store.save_layout(&self.layout, &self.settings);
+        }
+    }
+
+    /// Every app, hidden ones included, A to Z.
+    pub fn all_apps(&self) -> &[AppRecord] {
+        &self.all_records
+    }
+
+    pub fn is_hidden(&self, key: &AppKey) -> bool {
+        self.layout.is_hidden(key)
+    }
+
+    /// Hide an app (it leaves Home, the list and search) or bring it back
+    /// (to the list and search; it doesn't go back on Home).
+    pub fn toggle_hidden(&mut self, key: &AppKey) {
+        if self.layout.is_hidden(key) {
+            self.layout.unhide(key);
+        } else {
+            self.layout.hide(key);
+        }
+        self.rebuild_visible();
+        self.commit(if self.layout.is_hidden(key) { "app hidden" } else { "app unhidden" });
     }
 
     fn rebuild_visible(&mut self) {
@@ -342,7 +390,7 @@ impl Home {
         let (page, col, row) = (f.page, f.col, f.row);
         if !name.trim().is_empty() {
             self.layout.rename_folder(page, col, row, &name);
-            self.store.save_layout(&self.layout);
+            self.store.save_layout(&self.layout, &self.settings);
             log::info!("folder renamed ({} chars)", name.chars().count());
         }
         true
@@ -351,7 +399,7 @@ impl Home {
     fn save_name(&mut self, f: &OpenFolder) {
         if let Some(name) = f.renaming.as_deref().filter(|n| !n.trim().is_empty()) {
             self.layout.rename_folder(f.page, f.col, f.row, name);
-            self.store.save_layout(&self.layout);
+            self.store.save_layout(&self.layout, &self.settings);
             log::info!("folder renamed ({} chars)", name.chars().count());
         }
     }
@@ -366,7 +414,7 @@ impl Home {
     fn commit(&mut self, why: &str) {
         self.layout.trim_empty_pages();
         self.pager.set_pages(self.layout.pages.len());
-        self.store.save_layout(&self.layout);
+        self.store.save_layout(&self.layout, &self.settings);
         log::info!("layout: {why}, {} page(s)", self.layout.pages.len());
     }
 
@@ -903,7 +951,7 @@ impl Home {
         let m_icon = size as f32;
         icons.set_size(size);
         let white = Rgba::hex(WHITE);
-        let accent = Rgba::hex(ACCENT);
+        let accent = Rgba::hex(holo::accent());
 
         // Clock: bold hours, light minutes in the accent colour, centred.
         let (hours, minutes, date) = self.clock.clone();
@@ -945,7 +993,7 @@ impl Home {
                             f.name.clone()
                         }
                     };
-                    if !label.is_empty() {
+                    if self.settings.labels && !label.is_empty() {
                         let lw = r.measure(&label, label_em, label_max, Weight::Regular);
                         let cx = ir.0 + m_icon / 2.0;
                         let baseline = ir.1 + m_icon + m.label_gap + label_ascent;
@@ -1008,7 +1056,7 @@ impl Home {
     #[allow(clippy::too_many_arguments)]
     fn draw_lifted(&self, gl: &glow::Context, r: &mut Renderer, batch: &mut Batch, icons: &mut Icons, item: &Item, (x, y, s): (f32, f32, f32)) {
         let d = self.density;
-        let accent = Rgba::hex(ACCENT);
+        let accent = Rgba::hex(holo::accent());
         let radius = match item {
             Item::App(_) => s * 0.18,
             Item::Folder(_) => s / 2.0,
@@ -1044,7 +1092,7 @@ impl Home {
             }
             Mode::Drag { lift, x, y, .. } => {
                 // A faint outline where it would land.
-                let accent = Rgba::hex(ACCENT);
+                let accent = Rgba::hex(holo::accent());
                 match self.drop_pos(*x, *y) {
                     Some(Pos::Cell { page, col, row }) => {
                         let (cx, cy, cw, ch) = m.cell_rect(col, row);
@@ -1083,6 +1131,12 @@ impl Home {
             }
         }
     }
+}
+
+/// Make the settings felt: the accent colour and how long pages slide.
+fn apply(s: &Settings, pager: &mut Pager) {
+    holo::set_accent(s.accent.rgb());
+    pager.set_snap(SNAP.mul_f32(s.animations.factor()));
 }
 
 /// The app list without hidden apps.

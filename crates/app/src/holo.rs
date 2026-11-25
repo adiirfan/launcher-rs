@@ -3,8 +3,18 @@
 use launcher_draw::batch::Batch;
 use launcher_draw::{Rect, Rgba};
 
-/// Holo blue. Becomes a setting (blue, purple, green, orange) later.
-pub const ACCENT: u32 = 0x33B5E5;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+static ACCENT: AtomicU32 = AtomicU32::new(0x33B5E5);
+
+/// The accent colour the owner picked (Holo blue unless changed).
+pub fn accent() -> u32 {
+    ACCENT.load(Ordering::Relaxed)
+}
+
+pub fn set_accent(rgb: u32) {
+    ACCENT.store(rgb, Ordering::Relaxed);
+}
 pub const WHITE: u32 = 0xFFFFFF;
 pub const BLACK: u32 = 0x000000;
 /// Search bar text and icon on Home.
@@ -25,5 +35,15 @@ pub fn magnifier(batch: &mut Batch, cx: f32, cy: f32, d: f32, color: Rgba) {
     for step in 0..4 {
         let o = lens * 0.75 + (1.0 + step as f32 * 1.3) * d;
         batch.circle(lx + o, ly + o, 1.1 * d, color);
+    }
+}
+
+/// A line at any angle, drawn as a tight run of dots `width` across.
+pub fn stroke(batch: &mut Batch, (x0, y0): (f32, f32), (x1, y1): (f32, f32), width: f32, color: Rgba) {
+    let len = (x1 - x0).hypot(y1 - y0);
+    let steps = (len / (width * 0.35)).ceil().max(1.0) as usize;
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        batch.circle(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, width / 2.0, color);
     }
 }
