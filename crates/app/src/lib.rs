@@ -34,6 +34,7 @@ fn android_main(app: AndroidApp) {
             .with_tag("launcher"),
     );
     log::info!("android_main start");
+    return_freed_memory_quickly();
 
     let mut sched = FrameScheduler::new();
     let mut gfx: Option<GlSurface> = None;
@@ -124,6 +125,7 @@ fn android_main(app: AndroidApp) {
                 let r = renderer.get_or_insert_with(|| {
                     Renderer::new(g.gl(), fonts::load_system_fonts(), fonts::load_system_fonts_bold())
                 });
+                let first = scene.is_none();
                 let s = scene.get_or_insert_with(|| Scene::load(&app));
                 let t0 = Instant::now();
                 draw(g, r, &mut batch, s);
@@ -134,6 +136,9 @@ fn android_main(app: AndroidApp) {
                     log::info!("frame time over 10: avg {:.2} ms, worst {:.2} ms",
                         avg.as_secs_f64() * 1e3, worst.as_secs_f64() * 1e3);
                     timings.clear();
+                }
+                if first {
+                    purge_freed_memory();
                 }
                 if r.wants_redraw() {
                     sched.request_redraw();
@@ -304,4 +309,24 @@ fn draw(g: &GlSurface, r: &mut Renderer, batch: &mut Batch, scene: &Scene) {
     if let Err(e) = g.swap() {
         log::error!("swap failed: {e}");
     }
+}
+
+unsafe extern "C" {
+    fn mallopt(param: i32, value: i32) -> i32;
+}
+
+/// Ask the allocator to hand freed pages back about a second after they are
+/// freed (bionic's M_DECAY_TIME, Android 9+), instead of keeping them.
+fn return_freed_memory_quickly() {
+    const M_DECAY_TIME: i32 = -100;
+    let rc = unsafe { mallopt(M_DECAY_TIME, 1) };
+    log::info!("allocator decay time 1 s -> {rc}");
+}
+
+/// Give memory freed during startup back to the system now (bionic's
+/// M_PURGE; returns 1 where supported).
+fn purge_freed_memory() {
+    const M_PURGE: i32 = -101;
+    let rc = unsafe { mallopt(M_PURGE, 0) };
+    log::info!("purge freed memory -> {rc}");
 }

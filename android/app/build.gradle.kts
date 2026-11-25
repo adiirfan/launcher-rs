@@ -26,9 +26,3 @@ android {
     }
 }
 
-dependencies {
-    // Must match what android-activity 0.6.1 was built against. No prefab.
-    implementation("androidx.games:games-activity:4.4.0")
-    // GameActivity extends AppCompatActivity but declares no dependencies of its own.
-    implementation("androidx.appcompat:appcompat:1.7.1")
-}

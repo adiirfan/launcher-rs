@@ -1,17 +1,15 @@
 package dev.launcherrs.app;
 
+import android.app.NativeActivity;
 import android.graphics.PixelFormat;
 import android.os.Bundle;
 
-import com.google.androidgamesdk.GameActivity;
-
 /** Android needs a Java class to start. All logic lives in Rust (liblauncher). */
-public class MainActivity extends GameActivity {
+public class MainActivity extends NativeActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        // Let the wallpaper show through wherever Rust draws nothing.
-        mSurfaceView.getHolder().setFormat(PixelFormat.TRANSLUCENT);
-        mSurfaceView.setZOrderOnTop(true);
+        // NativeActivity picks an opaque format; let the wallpaper show through.
+        getWindow().setFormat(PixelFormat.TRANSLUCENT);
     }
 }

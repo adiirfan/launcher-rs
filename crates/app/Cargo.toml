@@ -13,7 +13,7 @@ launcher-core = { path = "../core" }
 launcher-draw = { path = "../draw" }
 
 [target.'cfg(target_os = "android")'.dependencies]
-android-activity = { version = "0.6.1", features = ["game-activity"] }
+android-activity = { version = "0.6.1", features = ["native-activity"] }
 ndk = "0.9"
 khronos-egl = { version = "6", features = ["static", "no-pkg-config"] }
 glow = "0.18"
