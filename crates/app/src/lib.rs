@@ -47,7 +47,7 @@ const ANIM_STEP: Duration = Duration::from_millis(20);
 fn android_main(app: AndroidApp) {
     android_logger::init_once(
         android_logger::Config::default()
-            .with_max_level(log::LevelFilter::Info)
+            .with_max_level(log_level())
             .with_tag("launcher"),
     );
     log::info!("android_main start, {:.0} ms after process start", ms_since_process_start());
@@ -350,6 +350,22 @@ fn insets(app: &AndroidApp, (w, h): (i32, i32), last: &mut Option<Insets>) -> In
     }
     *last = Some(ins);
     ins
+}
+
+unsafe extern "C" {
+    fn __system_property_get(name: *const libc::c_char, value: *mut libc::c_char) -> libc::c_int;
+}
+
+/// Warnings only, unless `adb shell setprop debug.launcherrs.log info`
+/// (or `debug`) asks for more. Read once at start.
+fn log_level() -> log::LevelFilter {
+    let mut value = [0u8; 92];
+    let n = unsafe { __system_property_get(c"debug.launcherrs.log".as_ptr(), value.as_mut_ptr().cast()) };
+    match &value[..n.clamp(0, 91) as usize] {
+        b"info" => log::LevelFilter::Info,
+        b"debug" => log::LevelFilter::Debug,
+        _ => log::LevelFilter::Warn,
+    }
 }
 
 fn current_minute() -> u64 {
