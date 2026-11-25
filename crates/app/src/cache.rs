@@ -11,8 +11,11 @@ use launcher_core::applist::{self, AppRecord};
 use launcher_core::home::{AppKey, HomeLayout};
 use launcher_core::settings::Settings;
 
-/// Holo icons (two-layer icons cut to a rounded square).
-const ICONS: &str = "icons-holo";
+/// Holo icons (two-layer icons cut to a rounded square, padded pictures
+/// enlarged).
+const ICONS: &str = "icons-holo-2";
+/// Earlier icon folders, removed on start.
+const OLD_ICONS: [&str; 2] = ["icons", "icons-holo"];
 
 #[derive(Clone)]
 pub struct Store {
@@ -45,10 +48,12 @@ impl Store {
         if let Err(e) = fs::create_dir_all(dir.join(ICONS)) {
             log::warn!("cache folder: {e}");
         }
-        // Icons cut by the old look; never mixed with the Holo ones.
-        if dir.join("icons").exists() {
-            let _ = fs::remove_dir_all(dir.join("icons"));
-            log::info!("cache: removed old icon folder");
+        // Icons made the old way; never mixed with the current ones.
+        for old in OLD_ICONS {
+            if dir.join(old).exists() {
+                let _ = fs::remove_dir_all(dir.join(old));
+                log::info!("cache: removed old icon folder");
+            }
         }
         Store { data: base, dir }
     }

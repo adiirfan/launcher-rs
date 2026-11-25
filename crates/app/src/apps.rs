@@ -8,7 +8,7 @@ use launcher_core::applist::AppRecord;
 use launcher_core::geometry::{HOLO_COLS, HOLO_ROWS};
 use launcher_core::home::{AppKey, HomeLayout};
 
-use launcher_draw::shape::round_square_mask;
+use launcher_draw::shape::{fill_bounds, round_square_mask};
 
 use crate::jni_util::with_activity;
 
@@ -188,27 +188,26 @@ pub fn load_icon_rgba(app: &AndroidApp, entry: &AppKey, size_px: i32) -> Option<
                 env.call_method(&layer, jni_str!("draw"), jni_sig!("(Landroid/graphics/Canvas;)V"), &[JValue::Object(&canvas)])?;
             }
         } else {
-            env.call_method(
-                &drawable,
-                jni_str!("setBounds"),
-                jni_sig!("(IIII)V"),
-                &[JValue::Int(0), JValue::Int(0), JValue::Int(size_px), JValue::Int(size_px)],
-            )?;
-            env.call_method(&drawable, jni_str!("draw"), jni_sig!("(Landroid/graphics/Canvas;)V"), &[JValue::Object(&canvas)])?;
+            let draw_at = |env: &mut Env, b: (i32, i32, i32, i32)| -> jni::errors::Result<()> {
+                env.call_method(
+                    &drawable,
+                    jni_str!("setBounds"),
+                    jni_sig!("(IIII)V"),
+                    &[JValue::Int(b.0), JValue::Int(b.1), JValue::Int(b.2), JValue::Int(b.3)],
+                )?;
+                env.call_method(&drawable, jni_str!("draw"), jni_sig!("(Landroid/graphics/Canvas;)V"), &[JValue::Object(&canvas)])?;
+                Ok(())
+            };
+            draw_at(env, (0, 0, size_px, size_px))?;
+            // An icon picture with a wide empty border: draw it again bigger.
+            let first = bitmap_bytes(env, &bitmap, size_px)?;
+            if let Some(b) = fill_bounds(&first, size_px as u32) {
+                env.call_method(&bitmap, jni_str!("eraseColor"), jni_sig!("(I)V"), &[JValue::Int(0)])?;
+                draw_at(env, b)?;
+            }
         }
-        let buffer = env
-            .call_static_method(
-                jni_str!("java/nio/ByteBuffer"),
-                jni_str!("allocate"),
-                jni_sig!("(I)Ljava/nio/ByteBuffer;"),
-                &[JValue::Int(size_px * size_px * 4)],
-            )?
-            .l()?;
-        env.call_method(&bitmap, jni_str!("copyPixelsToBuffer"), jni_sig!("(Ljava/nio/Buffer;)V"), &[JValue::Object(&buffer)])?;
+        let mut bytes = bitmap_bytes(env, &bitmap, size_px)?;
         env.call_method(&bitmap, jni_str!("recycle"), jni_sig!("()V"), &[])?;
-        let array = env.call_method(&buffer, jni_str!("array"), jni_sig!("()[B"), &[])?.l()?;
-        let array = env.cast_local::<jni::objects::JByteArray>(array)?;
-        let mut bytes = env.convert_byte_array(&array)?;
         if layered {
             round_square_mask(&mut bytes, size_px as u32, size_px as f32 * HOLO_CORNER);
         }
@@ -228,6 +227,22 @@ pub fn load_icon_rgba(app: &AndroidApp, entry: &AppKey, size_px: i32) -> Option<
 }
 
 /// Open the app. `false` (and a log line) if Android refused, e.g. it was uninstalled.
+/// The pixels of a `size`×`size` bitmap, as RGBA bytes.
+fn bitmap_bytes(env: &mut Env, bitmap: &JObject, size: i32) -> jni::errors::Result<Vec<u8>> {
+    let buffer = env
+        .call_static_method(
+            jni_str!("java/nio/ByteBuffer"),
+            jni_str!("allocate"),
+            jni_sig!("(I)Ljava/nio/ByteBuffer;"),
+            &[JValue::Int(size * size * 4)],
+        )?
+        .l()?;
+    env.call_method(bitmap, jni_str!("copyPixelsToBuffer"), jni_sig!("(Ljava/nio/Buffer;)V"), &[JValue::Object(&buffer)])?;
+    let array = env.call_method(&buffer, jni_str!("array"), jni_sig!("()[B"), &[])?.l()?;
+    let array = env.cast_local::<jni::objects::JByteArray>(array)?;
+    env.convert_byte_array(&array)
+}
+
 pub fn launch(app: &AndroidApp, entry: &AppKey) -> bool {
     let result = with_activity(app, |env, activity| {
         let la = launcher_apps(env, activity)?;

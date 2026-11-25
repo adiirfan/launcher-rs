@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use launcher_core::geometry::COLUMN_MAX_DP;
 use launcher_core::home::{AppKey, Folder};
 use launcher_draw::batch::Batch;
 use launcher_draw::{Rect, Rgba};
@@ -45,10 +46,11 @@ pub struct Panel {
 }
 
 impl Panel {
-    /// Full width less 16 dp each side, starting at `top`.
+    /// Full width less 16 dp each side, starting at `top`; on a wide screen
+    /// no wider than Home's centred column.
     pub fn new(screen_w: f32, top: f32, icon: f32, apps: usize, d: f32) -> Panel {
-        let x = 16.0 * d;
-        let w = screen_w - 32.0 * d;
+        let w = (screen_w - 32.0 * d).min((COLUMN_MAX_DP - 32.0) * d);
+        let x = (screen_w - w) / 2.0;
         let name = (x + 16.0 * d, top + 8.0 * d, w - 32.0 * d, 48.0 * d);
         let grid_top = name.1 + name.3 + 8.0 * d;
         let row_h = icon + 6.0 * d + 18.0 * d + 14.0 * d;
