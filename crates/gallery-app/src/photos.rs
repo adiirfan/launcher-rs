@@ -331,6 +331,10 @@ impl Photos {
             let scroll = self.scroller.offset(now);
             let view = bottom - top;
             let rows = self.grid.visible(scroll, view);
+            let on_screen: usize = rows.clone().map(|i| if let Row::Tiles { count, .. } = self.grid.rows[i] { count as usize } else { 0 }).sum();
+            // Room for this screen and as much again; grows once, up to the
+            // most it may.
+            r.reserve_icons(gl, on_screen * 2, thumbs::SIZE);
             let step = self.grid.tile_px + self.spec.gap_px;
             for i in rows.clone() {
                 let row = self.grid.rows[i];
@@ -377,13 +381,19 @@ impl Photos {
                 }
             }
             // Load a little ahead in both directions, after what's on screen.
-            let ahead = self.grid.visible((scroll - view * 0.5).max(0.0), view * 2.0);
-            for i in ahead {
-                if rows.contains(&i) {
-                    continue;
-                }
+            // Nearest rows first, and only as many as fit beside what's on
+            // screen: more would push tiles on screen out and make them
+            // blink as they load again.
+            let mut budget = gallery_core::grid::ahead_budget(on_screen, r.icon_capacity());
+            let mut near: Vec<usize> = self.grid.visible((scroll - view * 0.5).max(0.0), view * 2.0).filter(|i| !rows.contains(i)).collect();
+            near.sort_by_key(|&i| if i < rows.start { rows.start - i } else { i + 1 - rows.end });
+            'rows: for i in near {
                 if let Row::Tiles { first, count, .. } = self.grid.rows[i] {
                     for k in 0..count {
+                        if budget == 0 {
+                            break 'rows;
+                        }
+                        budget -= 1;
                         let item = &self.items[self.arranged.order[(first + k) as usize] as usize];
                         if r.icon_uv(&thumbs::key(item.id)).is_none() && !thumbs.failed(item.id) {
                             missing.push((item.id, item.kind == Kind::Video, item.orientation));

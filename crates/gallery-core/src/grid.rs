@@ -47,6 +47,14 @@ pub fn default_cols(width_dp: f32) -> u32 {
     if width_dp < 600.0 { 4 } else { ((width_dp / 110.0).round() as u32).max(4) }
 }
 
+/// How many thumbnails beyond the `visible` ones may be loaded ahead with
+/// `capacity` slots, keeping a few spare, so loading ahead never pushes a
+/// tile on screen out.
+pub fn ahead_budget(visible: usize, capacity: usize) -> usize {
+    const SPARE: usize = 8;
+    capacity.saturating_sub(visible + SPARE)
+}
+
 /// One column more or fewer per pinch that grows past 1.25× or shrinks
 /// under 0.8×; from 3 up to 7 (more on wide screens).
 pub fn pinch_cols(current: u32, scale: f32, width_dp: f32) -> u32 {
@@ -269,5 +277,12 @@ mod tests {
         assert_eq!(g.label_at(&a, second), Some("G1"));
         assert_eq!(g.label_at(&a, g.height + 100.0), Some("G1"));
         assert_eq!(lay_out(&arranged(&[]), &s).label_at(&arranged(&[]), 0.0), None);
+    }
+
+    #[test]
+    fn loading_ahead_fits_beside_what_is_on_screen() {
+        assert_eq!(ahead_budget(36, 96), 52);
+        assert_eq!(ahead_budget(95, 96), 0);
+        assert_eq!(ahead_budget(130, 96), 0);
     }
 }

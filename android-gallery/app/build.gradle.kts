@@ -11,8 +11,8 @@ android {
         applicationId = "dev.launcherrs.gallery"
         minSdk = 26
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.2.1"
+        versionCode = 5
+        versionName = "0.2.2"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 

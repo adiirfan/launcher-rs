@@ -29,9 +29,10 @@ impl RendererConfig {
     /// safe on every OpenGL ES 3 phone.
     pub const LAUNCHER: RendererConfig =
         RendererConfig { image_atlas: (2048, 1024), image_atlas_max_h: 4096, glyph_atlas: (1024, 1024) };
-    /// 96 thumbnail slots of 256 px (24 MB), fixed.
+    /// 96 thumbnail slots of 256 px (24 MB); grows to 128 (32 MB) when a
+    /// big screen or small tiles need more than 96 at once.
     pub const GALLERY: RendererConfig =
-        RendererConfig { image_atlas: (2048, 3072), image_atlas_max_h: 3072, glyph_atlas: (1024, 1024) };
+        RendererConfig { image_atlas: (2048, 3072), image_atlas_max_h: 4096, glyph_atlas: (1024, 1024) };
 }
 
 const VS: &str = r#"#version 300 es
@@ -325,6 +326,11 @@ impl Renderer {
         if let Some(p) = self.icon_slots.as_mut() {
             p.grow(need);
         }
+    }
+
+    /// How many icons the atlas holds now (0 before the first one).
+    pub fn icon_capacity(&self) -> usize {
+        self.icon_slots.as_ref().map_or(0, SlotPool::capacity)
     }
 
     /// An icon can go in without pushing another out.

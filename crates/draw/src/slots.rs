@@ -1,5 +1,5 @@
 //! Equal-sized icon slots in one atlas. When every slot is taken, the slot
-//! drawn longest ago is reused, so a list can scroll past any number of
+//! drawn longest ago (not in the last two frames) is reused, so a list can scroll past any number of
 //! apps with a fixed amount of graphics memory.
 
 use std::collections::HashMap;
@@ -81,8 +81,11 @@ impl SlotPool {
         let i = match free {
             Some(i) => i,
             None => {
-                let (i, &used) = self.used.iter().enumerate().filter(|&(_, &u)| u < self.frame).min_by_key(|&(_, &u)| u)?;
-                debug_assert!(used < self.frame);
+                // Not one drawn this frame or the one before: new pictures
+                // usually arrive before the frame is drawn, and pushing out
+                // something just on screen makes it blink as it reloads.
+                let (i, &used) = self.used.iter().enumerate().filter(|&(_, &u)| u + 1 < self.frame).min_by_key(|&(_, &u)| u)?;
+                debug_assert!(used + 1 < self.frame);
                 if let Some(old) = self.owners[i].take() {
                     self.keys.remove(&old);
                 }
@@ -146,6 +149,27 @@ mod tests {
         assert!(!p.has_free());
         p.forget("a");
         assert!(p.has_free());
+    }
+
+    #[test]
+    fn insert_keeps_what_was_drawn_last_frame() {
+        let mut p = SlotPool::new(2 * 11, 11, 10); // two slots
+        p.insert("a").unwrap();
+        p.insert("b").unwrap();
+        p.begin_frame();
+        p.get("a");
+        p.get("b");
+        // Next frame, before drawing: both were on screen a moment ago.
+        p.begin_frame();
+        assert!(p.insert("c").is_none());
+        assert!(p.get("a").is_some() && p.get("b").is_some());
+        // Only a is drawn; a frame later b may make way.
+        p.begin_frame();
+        p.begin_frame();
+        p.get("a");
+        p.begin_frame();
+        assert!(p.insert("c").is_some());
+        assert!(p.get("b").is_none() && p.get("a").is_some());
     }
 
     #[test]
