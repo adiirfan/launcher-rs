@@ -253,3 +253,74 @@ pub fn toast(gl: &Context, r: &mut Renderer, batch: &mut Batch, msg: &str, w: f3
     batch.rect(rc, Rgba::hex(0x333333).with_alpha(0.95), 4.0 * d);
     r.text(gl, batch, msg, rc.x + 20.0 * d, baseline(r, rc.y + h / 2.0, em, d), em, mw + 1.0, Rgba::hex(WHITE), Weight::Regular);
 }
+
+/// Split `s` into lines no wider than `max`.
+pub fn wrap(r: &mut Renderer, s: &str, em: f32, max: f32) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in s.split(' ') {
+        let longer = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
+        if !line.is_empty() && r.measure(&longer, em, f32::MAX, Weight::Regular) > max {
+            lines.push(std::mem::replace(&mut line, word.to_string()));
+        } else {
+            line = longer;
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// A Holo tick box, 18 dp, centred on (cx, cy).
+pub fn tick_box(batch: &mut Batch, cx: f32, cy: f32, on: bool, d: f32) {
+    let (bx, by, s) = (cx - 9.0 * d, cy - 9.0 * d, 18.0 * d);
+    batch.rect(Rect::new(bx, by, s, s), Rgba::hex(0x1A1A1A), 0.0);
+    batch.outline(Rect::new(bx, by, s, s), Rgba::hex(0x8C8C8C), 0.0, 2.0 * d);
+    if on {
+        let (ox, oy) = (bx - 5.0 * d, by - 7.0 * d);
+        let p = |x: f32, y: f32| (ox + x * d, oy + y * d);
+        let (a, b, c) = (p(9.0, 15.0), p(14.0, 20.0), p(27.0, 5.0));
+        holo::stroke(batch, a, b, 3.5 * d, accent());
+        holo::stroke(batch, b, c, 3.5 * d, accent());
+    }
+}
+
+/// An editor's bar, as the mockups: X, a title and SAVE COPY with a tick.
+/// Returns the close and save buttons' rectangles.
+#[allow(clippy::too_many_arguments)]
+pub fn editor_bar(gl: &Context, r: &mut Renderer, batch: &mut Batch, w: f32, top: f32, title: &str, pressed: (bool, bool), save_on: bool, d: f32) -> (Rect, Rect) {
+    let (close, save) = editor_bar_buttons(Some(r), w, top, d);
+    let h = 56.0 * d;
+    let white = Rgba::hex(WHITE);
+    batch.rect(Rect::new(0.0, 0.0, w, top + h), Rgba::hex(0x141414), 0.0);
+    batch.rect(Rect::new(0.0, top + h - 2.0 * d, w, 2.0 * d), accent(), 0.0);
+    for (rc, on) in [(close, pressed.0), (save, pressed.1)] {
+        if on {
+            batch.rect(rc, accent().with_alpha(0.3), 0.0);
+        }
+    }
+    let cy = top + h / 2.0;
+    let xc = close.x + close.w / 2.0;
+    holo::stroke(batch, (xc - 7.0 * d, cy - 7.0 * d), (xc + 7.0 * d, cy + 7.0 * d), 2.2 * d, white);
+    holo::stroke(batch, (xc + 7.0 * d, cy - 7.0 * d), (xc - 7.0 * d, cy + 7.0 * d), 2.2 * d, white);
+    batch.rect(Rect::new(close.x + close.w, top, 1.0 * d, h - 2.0 * d), Rgba::hex(0x2A2A2A), 0.0);
+    let em = 20.0 * d;
+    r.text(gl, batch, title, close.x + close.w + 16.0 * d, baseline(r, cy, em, d), em, save.x - close.x - close.w - 24.0 * d, white, Weight::Regular);
+    batch.rect(Rect::new(save.x, top, 1.0 * d, h - 2.0 * d), Rgba::hex(0x2A2A2A), 0.0);
+    let c = if save_on { white } else { Rgba::hex(0x6E6E6E) };
+    let tick = if save_on { accent() } else { c };
+    let (kx, ky) = (save.x + 16.0 * d, cy);
+    holo::stroke(batch, (kx, ky), (kx + 5.0 * d, ky + 5.0 * d), 2.4 * d, tick);
+    holo::stroke(batch, (kx + 5.0 * d, ky + 5.0 * d), (kx + 16.0 * d, ky - 6.0 * d), 2.4 * d, tick);
+    let lem = 14.0 * d;
+    r.text_spaced(gl, batch, "SAVE COPY", kx + 26.0 * d, baseline(r, cy, lem, d), lem, 0.6 * d, save.w, c, Weight::Medium);
+    (close, save)
+}
+
+/// Where `editor_bar` puts X and SAVE COPY (without a renderer: a fixed width).
+pub fn editor_bar_buttons(r: Option<&mut Renderer>, w: f32, top: f32, d: f32) -> (Rect, Rect) {
+    let h = 56.0 * d;
+    let save_w = r.map_or(130.0 * d, |r| r.measure_spaced("SAVE COPY", 14.0 * d, 0.6 * d, Weight::Medium) + 60.0 * d);
+    (Rect::new(0.0, top, 48.0 * d, h), Rect::new(w - save_w, top, save_w, h))
+}

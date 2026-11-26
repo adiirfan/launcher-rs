@@ -27,8 +27,6 @@ use crate::thumbs::{self, Thumbs};
 use crate::widgets::{self, MenuRow, TILE_EMPTY};
 
 const SUB: u32 = 0x9E9E9E;
-const BOX_FILL: u32 = 0x1A1A1A;
-const BOX_EDGE: u32 = 0x8C8C8C;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
@@ -193,23 +191,6 @@ impl SettingsScreen {
         out
     }
 
-    fn wrap(r: &mut Renderer, s: &str, em: f32, max: f32) -> Vec<String> {
-        let mut lines = Vec::new();
-        let mut line = String::new();
-        for word in s.split(' ') {
-            let longer = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
-            if !line.is_empty() && r.measure(&longer, em, f32::MAX, Weight::Regular) > max {
-                lines.push(std::mem::replace(&mut line, word.to_string()));
-            } else {
-                line = longer;
-            }
-        }
-        if !line.is_empty() {
-            lines.push(line);
-        }
-        lines
-    }
-
     fn lay_out(&mut self, r: &mut Renderer, s: &GallerySettings, manage: Option<bool>, w: f32) {
         let key = (s.clone(), w, manage, update::generation());
         if self.laid_out.as_ref() == Some(&key) {
@@ -224,7 +205,7 @@ impl SettingsScreen {
             for id in rows {
                 let (_, sub, tick) = row_text(id, s, manage);
                 let max = w - 40.0 * d - if tick.is_some() { 60.0 * d } else { 0.0 };
-                let sub = Self::wrap(r, &sub, 14.0 * d, max);
+                let sub = widgets::wrap(r, &sub, 14.0 * d, max);
                 let h = (51.0 + 19.0 * sub.len() as f32).max(72.0) * d;
                 blocks.push(Block::Row { id, y, h, sub });
                 y += h;
@@ -361,21 +342,6 @@ impl SettingsScreen {
         Action::None
     }
 
-    /// A Holo tick box, 18 dp, centred on (cx, cy).
-    fn tick_box(batch: &mut Batch, cx: f32, cy: f32, on: bool, d: f32) {
-        let (bx, by, s) = (cx - 9.0 * d, cy - 9.0 * d, 18.0 * d);
-        batch.rect(Rect::new(bx, by, s, s), Rgba::hex(BOX_FILL), 0.0);
-        batch.outline(Rect::new(bx, by, s, s), Rgba::hex(BOX_EDGE), 0.0, 2.0 * d);
-        if on {
-            let (ox, oy) = (bx - 5.0 * d, by - 7.0 * d);
-            let p = |x: f32, y: f32| (ox + x * d, oy + y * d);
-            let accent = Rgba::hex(holo::accent());
-            let (a, b, c) = (p(9.0, 15.0), p(14.0, 20.0), p(27.0, 5.0));
-            holo::stroke(batch, a, b, 3.5 * d, accent);
-            holo::stroke(batch, b, c, 3.5 * d, accent);
-        }
-    }
-
     /// Draw the screen. Returns whether it is still moving, and the folder
     /// covers it wants but has no picture for yet.
     #[allow(clippy::too_many_arguments)]
@@ -422,7 +388,7 @@ impl SettingsScreen {
                                 r.text(gl, batch, line, 20.0 * d, y + pad + 42.0 * d + i as f32 * 19.0 * d, 14.0 * d, max, Rgba::hex(SUB), Weight::Regular);
                             }
                             if let Some(on) = tick {
-                                Self::tick_box(batch, w - 42.0 * d, y + rh / 2.0, on, d);
+                                widgets::tick_box(batch, w - 42.0 * d, y + rh / 2.0, on, d);
                             }
                             batch.rect(Rect::new(16.0 * d, y + rh - 1.0 * d, w - 32.0 * d, 1.0 * d), Rgba::hex(ROW_LINE), 0.0);
                         }
@@ -458,7 +424,7 @@ impl SettingsScreen {
                     let count = if a.count == 1 { "1 item".to_string() } else { format!("{} items", a.count) };
                     r.text(gl, batch, &count, 80.0 * d, y + rh / 2.0 + 18.0 * d, 14.0 * d, max, Rgba::hex(SUB), Weight::Regular);
                     let on = matches!(a.filter, Filter::Bucket(id) if hidden.contains(&id));
-                    Self::tick_box(batch, w - 42.0 * d, y + rh / 2.0, on, d);
+                    widgets::tick_box(batch, w - 42.0 * d, y + rh / 2.0, on, d);
                     batch.rect(Rect::new(16.0 * d, y + rh - 1.0 * d, w - 32.0 * d, 1.0 * d), Rgba::hex(ROW_LINE), 0.0);
                 }
                 if self.folders.is_empty() {

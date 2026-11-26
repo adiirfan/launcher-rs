@@ -196,6 +196,8 @@ pub struct Viewer {
     /// Tapped play: the video opens on the next frame (it needs the GL context).
     open_video: Option<i64>,
     video_draw: Option<VideoDraw>,
+    /// Textures of a video handed over to an editor, freed on the next draw.
+    dead_video: Vec<glow::Texture>,
     muted: bool,
     press: Option<Button>,
     last_tap: Option<(Instant, f32, f32)>,
@@ -232,6 +234,7 @@ impl Viewer {
             video: None,
             open_video: None,
             video_draw: None,
+            dead_video: Vec::new(),
             muted: false,
             press: None,
             last_tap: None,
@@ -300,6 +303,9 @@ impl Viewer {
 
     /// Free the graphics memory; call before dropping the viewer.
     pub fn free(mut self, gl: &Context) {
+        for tex in self.dead_video.drain(..) {
+            unsafe { gl.delete_texture(tex) };
+        }
         for (_, p) in self.pics.drain() {
             p.tex.free(gl);
         }
@@ -323,8 +329,20 @@ impl Viewer {
         self.open_video = None;
     }
 
+    /// Stop the video so an editor can use the player.
+    pub fn release_video(&mut self) {
+        if let Some(v) = self.video.take() {
+            video::close(&self.app);
+            self.dead_video.push(v.tex);
+        }
+        self.open_video = None;
+    }
+
     /// The player's news, the newest frame, and where playback is.
     fn tend_video(&mut self, gl: &Context) {
+        for tex in self.dead_video.drain(..) {
+            unsafe { gl.delete_texture(tex) };
+        }
         if let Some(id) = self.open_video.take()
             && Some(id) == self.current
         {

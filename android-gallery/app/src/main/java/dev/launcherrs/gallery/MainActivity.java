@@ -65,6 +65,15 @@ public class MainActivity extends NativeActivity {
 
     /** Android 12+: the page where the owner lets us delete, restore and
      *  favourite without a confirm box each time. */
+    /** Android 10+: keep the system's edge swipes (Back) off these areas,
+     *  given as x, y, w, h groups in screen pixels; empty clears them. */
+    public void setGestureExclusion(int[] r) {
+        if (Build.VERSION.SDK_INT < 29) return;
+        java.util.ArrayList<android.graphics.Rect> list = new java.util.ArrayList<>();
+        for (int i = 0; i + 3 < r.length; i += 4) list.add(new android.graphics.Rect(r[i], r[i + 1], r[i] + r[i + 2], r[i + 1] + r[i + 3]));
+        runOnUiThread(() -> getWindow().getDecorView().setSystemGestureExclusionRects(list));
+    }
+
     public void openManageMedia() {
         if (Build.VERSION.SDK_INT < 31) return;
         try {
@@ -238,6 +247,10 @@ public class MainActivity extends NativeActivity {
     public void mediaRequest(int kind, long[] ids, boolean[] video, boolean on) {
         MediaActions.request(this, kind, ids, video, on);
     }
+    public void clipStrip(long id, int count, int height, int gen) { Frames.strip(this, id, count, height, gen); }
+    public String clipRun(long id, long startUs, long endUs, boolean exact, boolean keepSound, int fd) {
+        return Clipper.run(this, id, startUs, endUs, exact, keepSound, fd);
+    }
     public boolean moveOne(long id, boolean video, String rel, String name) { return MediaActions.moveOne(this, id, video, rel, name); }
     public String trashLegacy(long[] ids, boolean[] video) { return MediaActions.trashLegacy(this, ids, video); }
     public boolean restoreLegacy(String stored, String original) { return MediaActions.restoreLegacy(this, stored, original); }
@@ -274,6 +287,8 @@ public class MainActivity extends NativeActivity {
     static native void onBack();
     static native void onOpen(String uri, String mime, String name, long size, long modifiedMs);
     static native void onVideoFrame();
+    static native void onStripFrame(int gen, int index, int w, int h, int[] argb);
+    static native void onClipProgress(int percent);
     static native void onVideoState(int state, int w, int h);
     static native void onInsets(int top, int bottom, int left, int right);
     static native void onAccess(int sdk, boolean images, boolean video, boolean selected, boolean legacy);

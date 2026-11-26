@@ -214,6 +214,16 @@ unsafe fn build(gl: &glow::Context, vs: &str, fs: &str) -> Option<glow::Program>
 }
 
 impl VideoDraw {
+    pub fn free(self, gl: &glow::Context) {
+        unsafe {
+            gl.delete_program(self.program);
+            gl.delete_vertex_array(self.vao);
+            if let Some(b) = self.corners {
+                gl.delete_buffer(b);
+            }
+        }
+    }
+
     pub fn new(gl: &glow::Context) -> Option<VideoDraw> {
         unsafe {
             let (program, old) = match build(gl, VS3, FS3) {
