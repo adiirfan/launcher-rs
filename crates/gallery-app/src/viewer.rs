@@ -712,6 +712,18 @@ impl Viewer {
         if it.when_taken() > 0 {
             let when = dates::short_when(it.when_taken(), f.utc_offset_s, f.today);
             r.text(gl, batch, &when, tx, cy - 2.0 * d, 17.0 * d, tw, white, Weight::Regular);
+            if it.kind == Kind::Image && crate::motion::is(it.id) {
+                // A motion photo: shown as a still for now, with this label.
+                let ww = r.measure(&when, 17.0 * d, tw, Weight::Regular);
+                let em = 11.0 * d;
+                let lw = r.measure("MOTION", em, tw, Weight::Medium) + 12.0 * d;
+                let lx = tx + ww + 10.0 * d;
+                if lx + lw <= tx + tw {
+                    let lr = Rect::new(lx, cy - 2.0 * d - 15.0 * d, lw, 18.0 * d);
+                    batch.outline(lr, accent, 2.0 * d, 1.0 * d);
+                    r.text(gl, batch, "MOTION", lr.x + 6.0 * d, widgets::baseline(r, lr.y + lr.h / 2.0, em, d), em, lw, accent, Weight::Medium);
+                }
+            }
             r.text(gl, batch, &it.name, tx, cy + 17.0 * d, 13.0 * d, tw, Rgba::hex(FILE_GREY), Weight::Regular);
         } else {
             // No date known (a file from another app): just its name.

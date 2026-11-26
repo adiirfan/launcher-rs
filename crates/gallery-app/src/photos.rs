@@ -369,6 +369,7 @@ impl Photos {
                             match item.kind {
                                 Kind::Video => widgets::badge(gl, r, batch, rect.x + rect.w, rect.y + rect.h, &format::duration(item.duration_ms), true, d),
                                 Kind::Gif => widgets::badge(gl, r, batch, rect.x + rect.w, rect.y + rect.h, "GIF", false, d),
+                                Kind::Image if crate::motion::is(item.id) => widgets::badge(gl, r, batch, rect.x + rect.w, rect.y + rect.h, "MOTION", false, d),
                                 Kind::Image => {}
                             }
                         }

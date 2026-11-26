@@ -14,6 +14,7 @@ pub mod copies;
 pub mod crop;
 pub mod gif_plan;
 pub mod gif_video;
+pub mod motion;
 pub mod zoom;
 pub mod viewer_list;
 pub mod yuv;

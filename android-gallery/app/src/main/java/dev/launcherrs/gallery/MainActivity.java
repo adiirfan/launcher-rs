@@ -256,6 +256,7 @@ public class MainActivity extends NativeActivity {
     public boolean readerAdvance(long us) { return FrameReader.advance(us); }
     public byte[] readerPlane(int i) { return FrameReader.plane(i); }
     public int[] readerInfo() { return FrameReader.info(); }
+    public byte[] motionEnds(long id, int scan) { return Motion.ends(this, id, scan); }
     public boolean gifVideoStart(int fd, int w, int h, int fps, int bitRate) { return GifVideo.start(fd, w, h, fps, bitRate); }
     public boolean gifVideoPut(byte[] yuv, long ptsUs) { return GifVideo.put(yuv, ptsUs); }
     public String gifVideoFinish() { return GifVideo.finish(); }

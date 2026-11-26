@@ -161,6 +161,10 @@ fn work(shared: Arc<(Mutex<State>, Condvar)>) {
         if t.elapsed() > Duration::from_millis(100) {
             log::info!("slow thumbnail {id}: {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
         }
+        if ok && !video {
+            // Once per photo; the answer is ready when the thumbnail shows.
+            crate::motion::check(&app, id);
+        }
         let mut s = lock.lock().unwrap();
         s.queue.done(id, ok);
         if ok && let Ok(Some(p)) = pixels {

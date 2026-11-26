@@ -9,6 +9,7 @@ mod gif_maker;
 mod gif_player;
 mod gif_screen;
 mod gif_to_video;
+mod motion;
 mod save_video;
 mod photo_tex;
 mod video;
@@ -72,6 +73,7 @@ fn android_main(app: AndroidApp) {
     // Android 8-10: our own bin, and our own favourites list.
     let system_bin = actions::system_bin(&app);
     let mut favs = actions::Favourites::load(&data_dir);
+    motion::load(&data_dir);
     if !system_bin {
         actions::purge_expired(&app, actions::now_ms());
     }
@@ -162,6 +164,7 @@ fn android_main(app: AndroidApp) {
                         }
                     }
                     MainEvent::TerminateWindow { .. } => {
+                        motion::save();
                         if let Some(g) = gfx.as_mut() {
                             g.suspend();
                         }
