@@ -41,6 +41,13 @@ public class MainActivity extends NativeActivity {
             return v.onApplyWindowInsets(insets);
         });
         reportAccess();
+        // Android 13+: Back (gesture or button) comes here instead of as a
+        // key press; Rust decides what it closes. Without this, Android 16
+        // closes the whole app on a back swipe.
+        if (Build.VERSION.SDK_INT >= 33) {
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, MainActivity::onBack);
+        }
         Updater.onUpdate(Updater.IDLE, Updater.myVersion(this), 0);
         // A rebuilt activity has already shown this one.
         if (savedInstanceState == null) deliver(getIntent());
@@ -244,6 +251,7 @@ public class MainActivity extends NativeActivity {
     }
 
     static native void onActionDone(int kind, boolean ok);
+    static native void onBack();
     static native void onOpen(String uri, String mime, String name, long size, long modifiedMs);
     static native void onVideoFrame();
     static native void onVideoState(int state, int w, int h);

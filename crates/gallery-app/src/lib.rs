@@ -322,7 +322,9 @@ fn android_main(app: AndroidApp) {
             } else if on_albums {
                 on_albums = false;
             } else if !photos.back() {
-                system::finish(&app);
+                // Nothing left to close: step aside like Android 12+ apps
+                // do, keeping the gallery as it was for next time.
+                open_with::leave(&app);
             }
         }
         for (op, ok) in actions::take_done() {
