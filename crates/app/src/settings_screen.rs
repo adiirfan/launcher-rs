@@ -17,6 +17,7 @@ use crate::icons::Icons;
 use crate::listener;
 use crate::menu::{self, R4, inside};
 use crate::render::Renderer;
+use crate::update;
 
 const OPEN: Duration = Duration::from_millis(220);
 const CLOSE: Duration = Duration::from_millis(180);
@@ -40,14 +41,16 @@ enum RowId {
     Animations,
     Glow,
     Internet,
+    Updates,
 }
 
-const SECTIONS: [(&str, &[RowId]); 5] = [
+const SECTIONS: [(&str, &[RowId]); 6] = [
     ("LOOK", &[RowId::Theme, RowId::Accent, RowId::Icons, RowId::Labels]),
     ("HOME SCREEN", &[RowId::Clock, RowId::Music, RowId::AddNew, RowId::Search]),
     ("APPS", &[RowId::Hidden, RowId::Dots]),
     ("SPEED", &[RowId::Animations, RowId::Glow]),
     ("PRIVACY", &[RowId::Internet]),
+    ("ABOUT", &[RowId::Updates]),
 ];
 
 /// A row's title, its line underneath, and its tick box (if it has one).
@@ -78,7 +81,12 @@ fn row_text(id: RowId, s: &Settings, access: bool) -> (&'static str, String, Opt
         ),
         RowId::Animations => ("Animations", s.animations.name().into(), None),
         RowId::Glow => ("Scrolling glow", "A glow at the end of a list".into(), Some(s.glow)),
-        RowId::Internet => ("Internet access", "Not requested. The launcher works fully offline".into(), None),
+        RowId::Internet => (
+            "Internet access",
+            "Only when you tap Check for updates, to ask GitHub for a newer version. Nothing else goes online".into(),
+            None,
+        ),
+        RowId::Updates => ("Check for updates", update::line(), None),
     }
 }
 
@@ -122,7 +130,7 @@ pub struct SettingsScreen {
     picker: bool,
     blocks: Vec<Block>,
     /// Settings and width the blocks were laid out for.
-    laid_out: Option<(Settings, f32, bool)>,
+    laid_out: Option<(Settings, f32, bool, u32)>,
     screen: (f32, f32),
     insets: Insets,
     density: f32,
@@ -339,6 +347,7 @@ impl SettingsScreen {
                     self.page = Page::Hidden;
                     self.scroller.reset();
                 }
+                RowId::Updates => update::tapped(app),
                 // These rows only say what the launcher does.
                 RowId::Theme | RowId::Icons | RowId::Search | RowId::Internet => {}
             },
@@ -369,7 +378,8 @@ impl SettingsScreen {
     }
 
     fn lay_out(&mut self, r: &mut Renderer, s: &Settings, access: bool) {
-        if self.laid_out == Some((*s, self.screen.0, access)) {
+        let update_gen = update::generation();
+        if self.laid_out == Some((*s, self.screen.0, access, update_gen)) {
             return;
         }
         let d = self.density;
@@ -388,7 +398,7 @@ impl SettingsScreen {
             }
         }
         self.blocks = blocks;
-        self.laid_out = Some((*s, self.screen.0, access));
+        self.laid_out = Some((*s, self.screen.0, access, update_gen));
     }
 
     fn content_height(&self, apps: usize) -> f32 {

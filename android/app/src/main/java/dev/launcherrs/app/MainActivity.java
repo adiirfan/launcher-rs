@@ -42,6 +42,7 @@ public class MainActivity extends NativeActivity {
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         getWindow().setFormat(PixelFormat.TRANSLUCENT); // let the wallpaper show through
+        Updater.onUpdate(Updater.IDLE, Updater.myVersion(this), 0);
         // Bar sizes straight from Android: from Android 15 apps are drawn
         // under the bars, so the content area no longer shows them.
         getWindow().getDecorView().setOnApplyWindowInsetsListener((v, insets) -> {
@@ -70,6 +71,12 @@ public class MainActivity extends NativeActivity {
     }
 
     /** Called from Rust's thread; the keyboard may only be touched on the UI thread. */
+    /** Settings: "Check for updates" tapped. */
+    public void checkForUpdate() { runOnUiThread(() -> Updater.check(this)); }
+
+    /** Settings: a newer version was found and tapped. */
+    public void installUpdate() { runOnUiThread(() -> Updater.install(this)); }
+
     public void showKeyboard(boolean show) {
         runOnUiThread(() -> {
             InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
