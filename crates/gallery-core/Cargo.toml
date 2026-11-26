@@ -1,0 +1,8 @@
+[package]
+name = "gallery-core"
+edition.workspace = true
+version.workspace = true
+
+# The gallery's logic that can be tested without a phone.
+
+[dependencies]

@@ -1,0 +1,23 @@
+[package]
+name = "gallery-app"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "gallery"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+gallery-core = { path = "../gallery-core" }
+launcher-core = { path = "../core" }
+launcher-draw = { path = "../draw" }
+holo-platform = { path = "../platform" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6.1", features = ["native-activity"] }
+ndk = "0.9"
+glow = "0.18"
+jni = "0.22"
+libc = "0.2"
+log = "0.4"

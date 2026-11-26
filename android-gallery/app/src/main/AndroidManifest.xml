@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Reading photos and videos: the old storage permission up to Android 12,
+         the media ones from 13, and "limited access" from 14. -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <!-- Up to Android 10: moving deleted items into our own bin. -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+    <!-- Where a photo was taken, for its details page. -->
+    <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />
+    <!-- Android 12+: delete, restore and favourite without a confirm box each time, once allowed. -->
+    <uses-permission android:name="android.permission.MANAGE_MEDIA" />
+    <!-- Only for "Check for updates" in settings, and only when tapped. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <application
+        android:label="Gallery"
+        android:allowBackup="false"
+        android:hasCode="true"
+        android:requestLegacyExternalStorage="true"
+        android:theme="@style/GalleryTheme">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboardHidden|keyboard|navigation|uiMode|fontScale|fontWeightAdjustment|locale|layoutDirection|colorMode|touchscreen|mcc|mnc">
+            <meta-data android:name="android.app.lib_name" android:value="gallery" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
