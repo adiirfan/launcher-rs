@@ -19,14 +19,14 @@ pub fn action_bar(gl: &Context, r: &mut Renderer, batch: &mut Batch, w: f32, top
     let s = 32.0 * d;
     let (sx, sy) = (12.0 * d, cy - s / 2.0);
     batch.rect(Rect::new(sx, sy, s, s), Rgba::hex(holo::accent()), 4.0 * d);
-    picture_glyph(batch, sx + 6.0 * d, sy + 6.0 * d, 20.0 * d, Rgba::hex(BLACK), d);
+    picture_glyph(batch, sx + 6.0 * d, sy + 6.0 * d, 20.0 * d, Rgba::hex(BLACK));
     let em = 20.0 * d;
     r.text(gl, batch, title, sx + s + 10.0 * d, cy + r.ascent(em) / 2.0 - 1.0 * d, em, w - 120.0 * d, Rgba::hex(WHITE), Weight::Regular);
     top + h
 }
 
 /// A framed picture with two hills and a sun, `size` square.
-pub fn picture_glyph(batch: &mut Batch, x: f32, y: f32, size: f32, c: Rgba, d: f32) {
+pub fn picture_glyph(batch: &mut Batch, x: f32, y: f32, size: f32, c: Rgba) {
     let u = size / 24.0;
     let lw = 1.6 * u;
     batch.outline(Rect::new(x + 4.0 * u, y + 5.0 * u, 16.0 * u, 14.0 * u), c, 0.0, lw);

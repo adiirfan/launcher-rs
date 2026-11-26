@@ -4,6 +4,7 @@
 mod bars;
 mod chrome;
 mod input;
+mod library;
 mod system;
 
 use std::time::{Duration, Instant};
@@ -35,6 +36,10 @@ fn android_main(app: AndroidApp) {
     // A rebuilt activity runs a new loop in the same process: wake-ups and
     // the refresh callback must point at this one.
     waker::init(&app);
+    let data_dir = app.internal_data_path().unwrap_or_else(|| std::path::PathBuf::from("/data/local/tmp"));
+    library::start(&app, data_dir);
+    let mut items: std::sync::Arc<Vec<gallery_core::media::MediaItem>> = Default::default();
+    let mut asked_access = false;
 
     let mut sched = FrameScheduler::new();
     let mut gfx: Option<GlSurface> = None;
@@ -100,6 +105,14 @@ fn android_main(app: AndroidApp) {
         if input.back {
             system::finish(&app);
         }
+        if let Some(fresh) = library::take_update() {
+            items = fresh;
+            log::info!("showing {} items", items.len());
+            sched.request_redraw();
+        }
+        if library::take_asked() {
+            sched.request_redraw();
+        }
 
         let now = Instant::now();
         let tick = vsync.as_ref().and_then(|v| v.take_tick());
@@ -123,7 +136,7 @@ fn android_main(app: AndroidApp) {
                     frame_rate.apply(&w, vote);
                 }
             }
-            let mut moving = false;
+            let moving = false;
             let mut again = false;
             if let Some(g) = gfx.as_ref().filter(|g| g.has_surface()) {
                 let r = renderer.get_or_insert_with(|| {
@@ -165,6 +178,12 @@ fn android_main(app: AndroidApp) {
             if again {
                 sched.request_redraw();
             }
+        }
+
+        // First run: ask for the library once the first frame is up.
+        if !first_frame && !asked_access && library::access_known() && library::access() == gallery_core::access::Access::None {
+            asked_access = true;
+            library::request_access(&app);
         }
 
         if sched.is_animating() {
