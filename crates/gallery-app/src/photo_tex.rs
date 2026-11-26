@@ -65,8 +65,58 @@ impl Tex {
         unsafe { gl.delete_texture(self.tex) };
     }
 
-    pub fn bytes(&self) -> u64 {
-        self.w as u64 * self.h as u64 * 4
+}
+
+/// A picture going onto the graphics chip a few rows per frame, so a big
+/// one never freezes the screen (a 20 MB copy took 77 ms on the XZ2).
+pub struct Upload {
+    tex: Tex,
+    rgba: Vec<u8>,
+    row: u32,
+}
+
+/// Rows copied between clock checks.
+const ROWS: u32 = 32;
+
+impl Upload {
+    pub fn start(gl: &glow::Context, w: u32, h: u32, rgba: Vec<u8>) -> Option<Upload> {
+        if rgba.len() < (w * h * 4) as usize || w == 0 || h == 0 {
+            return None;
+        }
+        unsafe {
+            let tex = gl.create_texture().ok()?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, w as i32, h as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+            Some(Upload { tex: Tex { tex, w, h }, rgba, row: 0 })
+        }
+    }
+
+    /// Copy rows until `until`. The finished picture when all are in.
+    pub fn step(mut self, gl: &glow::Context, until: std::time::Instant) -> Result<Tex, Upload> {
+        let (w, h) = (self.tex.w, self.tex.h);
+        unsafe {
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.tex.tex));
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            while self.row < h {
+                let n = ROWS.min(h - self.row);
+                let from = (self.row * w * 4) as usize;
+                let to = from + (n * w * 4) as usize;
+                gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, self.row as i32, w as i32, n as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(&self.rgba[from..to])));
+                self.row += n;
+                if std::time::Instant::now() >= until {
+                    break;
+                }
+            }
+        }
+        if self.row >= h { Ok(self.tex) } else { Err(self) }
+    }
+
+    pub fn cancel(self, gl: &glow::Context) {
+        self.tex.free(gl);
     }
 }
 

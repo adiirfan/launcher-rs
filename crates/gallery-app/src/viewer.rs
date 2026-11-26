@@ -22,7 +22,7 @@ use launcher_draw::{Rect, Rgba};
 use crate::chrome::BAR_DP;
 use crate::gif_player::GifPlayer;
 use crate::input::{Touch, TouchKind};
-use crate::photo_tex::{PhotoDraw, Tex};
+use crate::photo_tex::{PhotoDraw, Tex, Upload};
 use crate::photos::Frame;
 use crate::thumbs::{self, Thumbs};
 use crate::viewer_jobs::{Done, Job, Jobs};
@@ -34,6 +34,8 @@ const DETAIL_AFTER: Duration = Duration::from_millis(150);
 const DOUBLE_TAP: Duration = Duration::from_millis(300);
 const TOAST_FOR: Duration = Duration::from_millis(2000);
 const BAR_BG: f32 = 0.6;
+/// Time per frame for copying pictures to the graphics chip.
+const UPLOAD_BUDGET: Duration = Duration::from_millis(4);
 const LINE: u32 = 0x2A2A2A;
 const PANEL: u32 = 0x141414;
 const ROW_LINE: u32 = 0x262626;
@@ -72,6 +74,25 @@ struct Region {
     tex: Tex,
 }
 
+enum Pending {
+    Full { id: i64, full: (u32, u32), up: Upload },
+    Region { id: i64, rect: (u32, u32, u32, u32), sample: u32, up: Upload },
+}
+
+impl Pending {
+    fn id(&self) -> i64 {
+        match self {
+            Pending::Full { id, .. } | Pending::Region { id, .. } => *id,
+        }
+    }
+
+    fn cancel(self, gl: &Context) {
+        match self {
+            Pending::Full { up, .. } | Pending::Region { up, .. } => up.cancel(gl),
+        }
+    }
+}
+
 struct Gif {
     id: i64,
     player: GifPlayer,
@@ -101,6 +122,8 @@ pub struct Viewer {
     pics: HashMap<i64, Pic>,
     failed: HashSet<i64>,
     region: Option<Region>,
+    /// Decoded pictures still being copied to the graphics chip.
+    pending: Vec<Pending>,
     zoom: Option<Zoom>,
     zoom_changed: Instant,
     gif: Option<Gif>,
@@ -129,6 +152,7 @@ impl Viewer {
             pics: HashMap::new(),
             failed: HashSet::new(),
             region: None,
+            pending: Vec::new(),
             zoom: None,
             zoom_changed: Instant::now(),
             gif: None,
@@ -182,6 +206,9 @@ impl Viewer {
         if let Some(t) = self.gif.take().and_then(|g| g.tex) {
             t.free(gl);
         }
+        for p in self.pending.drain(..) {
+            p.cancel(gl);
+        }
     }
 
     /// Picture size as it stands upright, before the decoded one arrives.
@@ -201,22 +228,18 @@ impl Viewer {
         for done in jobs.take() {
             match done {
                 Done::Full { id, w, h, full, rgba } if near.contains(&id) => {
-                    if let Some(tex) = Tex::upload(gl, w, h, &rgba) {
-                        if let Some(old) = self.pics.insert(id, Pic { tex, full }) {
-                            old.tex.free(gl);
-                        }
-                        // Now the real size is known: fit it afresh if untouched.
-                        if self.current == Some(id) && self.zoom.is_none_or(|z| z.is_fit()) {
-                            self.zoom = None;
-                        }
+                    if let Some(up) = Upload::start(gl, w, h, rgba) {
+                        self.pending.push(Pending::Full { id, full, up });
                     }
                 }
                 Done::Region { id, rect, w, h, rgba } if self.current == Some(id) => {
                     let sample = (rect.2 / w.max(1)).max(1);
-                    if let Some(tex) = Tex::upload(gl, w, h, &rgba)
-                        && let Some(old) = self.region.replace(Region { id, rect, sample, tex })
-                    {
-                        old.tex.free(gl);
+                    // A newer part replaces one still being copied.
+                    for p in self.pending.extract_if(.., |p| matches!(p, Pending::Region { .. })).collect::<Vec<_>>() {
+                        p.cancel(gl);
+                    }
+                    if let Some(up) = Upload::start(gl, w, h, rgba) {
+                        self.pending.push(Pending::Region { id, rect, sample, up });
                     }
                 }
                 Done::Gif { id, bytes } if self.current == Some(id) => match GifPlayer::new(bytes) {
@@ -239,6 +262,46 @@ impl Viewer {
         for id in stale {
             if let Some(p) = self.pics.remove(&id) {
                 p.tex.free(gl);
+            }
+        }
+        let current = self.current;
+        for p in self.pending.extract_if(.., |p| !near.contains(&p.id()) || matches!(p, Pending::Region { id, .. } if Some(*id) != current)).collect::<Vec<_>>() {
+            p.cancel(gl);
+        }
+        self.copy_some(gl, now + UPLOAD_BUDGET);
+    }
+
+    /// Copy waiting pictures for a while: the current one first, then its
+    /// full detail, then the neighbours.
+    fn copy_some(&mut self, gl: &Context, until: Instant) {
+        let current = self.current;
+        self.pending.sort_by_key(|p| match p {
+            Pending::Full { id, .. } if Some(*id) == current => 0,
+            Pending::Region { .. } => 1,
+            Pending::Full { .. } => 2,
+        });
+        while !self.pending.is_empty() && Instant::now() < until {
+            match self.pending.remove(0) {
+                Pending::Full { id, full, up } => match up.step(gl, until) {
+                    Ok(tex) => {
+                        if let Some(old) = self.pics.insert(id, Pic { tex, full }) {
+                            old.tex.free(gl);
+                        }
+                        // Now the real size is known: fit it afresh if untouched.
+                        if self.current == Some(id) && self.zoom.is_none_or(|z| z.is_fit()) {
+                            self.zoom = None;
+                        }
+                    }
+                    Err(up) => self.pending.insert(0, Pending::Full { id, full, up }),
+                },
+                Pending::Region { id, rect, sample, up } => match up.step(gl, until) {
+                    Ok(tex) => {
+                        if let Some(old) = self.region.replace(Region { id, rect, sample, tex }) {
+                            old.tex.free(gl);
+                        }
+                    }
+                    Err(up) => self.pending.insert(0, Pending::Region { id, rect, sample, up }),
+                },
             }
         }
     }
@@ -277,7 +340,8 @@ impl Viewer {
             sample *= 2;
         }
         let rect = (x.floor() as u32, y.floor() as u32, (w.ceil() as u32).max(1), (h.ceil() as u32).max(1));
-        if self.region.as_ref().is_some_and(|r| r.rect == rect && r.sample == sample) {
+        let copying = self.pending.iter().any(|p| matches!(p, Pending::Region { rect: r, sample: s, .. } if *r == rect && *s == sample));
+        if copying || self.region.as_ref().is_some_and(|r| r.rect == rect && r.sample == sample) {
             return None;
         }
         Some(Job::Region { id, orientation: it.orientation, rect, sample })
@@ -299,7 +363,9 @@ impl Viewer {
         let mut want = Vec::new();
         let max = (f.w as u32, f.h as u32);
         let full_job = |it: &MediaItem| Job::Full { id: it.id, orientation: it.orientation, max };
-        let wants_full = |v: &Viewer, it: &MediaItem| it.kind != Kind::Video && !v.pics.contains_key(&it.id) && !v.failed.contains(&it.id);
+        let wants_full = |v: &Viewer, it: &MediaItem| {
+            it.kind != Kind::Video && !v.pics.contains_key(&it.id) && !v.failed.contains(&it.id) && !v.pending.iter().any(|p| matches!(p, Pending::Full { id, .. } if *id == it.id))
+        };
         if let Some(it) = self.item(page) {
             if wants_full(self, it) {
                 want.push(full_job(it));
@@ -322,7 +388,7 @@ impl Viewer {
         jobs.want(want);
 
         // The next GIF frame, when it's due.
-        let mut moving = self.pager.animating(now) || !matches!(self.mode, Mode::Idle);
+        let mut moving = self.pager.animating(now) || !matches!(self.mode, Mode::Idle) || !self.pending.is_empty();
         if let Some(g) = self.gif.as_mut() {
             moving = true;
             if now >= g.next_at
