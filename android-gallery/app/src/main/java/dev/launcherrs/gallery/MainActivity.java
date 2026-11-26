@@ -251,6 +251,11 @@ public class MainActivity extends NativeActivity {
     public boolean editConvert(long id, int orientation, int w, int h, int format, int quality, int fd, boolean keepDetails, boolean noLocation) {
         return Editing.convert(this, id, orientation, w, h, format, quality, fd, keepDetails, noLocation);
     }
+    public void gifDone() { FrameReader.close(); }
+    public boolean readerOpen(long id, long startUs) { return FrameReader.open(this, id, startUs); }
+    public boolean readerAdvance(long us) { return FrameReader.advance(us); }
+    public byte[] readerPlane(int i) { return FrameReader.plane(i); }
+    public int[] readerInfo() { return FrameReader.info(); }
     public void clipStrip(long id, int count, int height, int gen) { Frames.strip(this, id, count, height, gen); }
     public String clipRun(long id, long startUs, long endUs, boolean exact, boolean keepSound, int fd) {
         return Clipper.run(this, id, startUs, endUs, exact, keepSound, fd);

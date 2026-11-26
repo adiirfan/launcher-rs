@@ -7,3 +7,5 @@ version.workspace = true
 
 [dependencies]
 launcher-core = { path = "../core" }
+# NeuQuant colour reduction for GIFs (MIT).
+color_quant = "1.1"

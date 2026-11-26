@@ -329,6 +329,11 @@ impl Viewer {
         self.open_video = None;
     }
 
+    /// Where the open video is, in ms (0 when none is playing).
+    pub fn video_pos(&self) -> u64 {
+        self.video.as_ref().map_or(0, |v| v.pos)
+    }
+
     /// Stop the video so an editor can use the player.
     pub fn release_video(&mut self) {
         if let Some(v) = self.video.take() {

@@ -286,11 +286,11 @@ pub fn tick_box(batch: &mut Batch, cx: f32, cy: f32, on: bool, d: f32) {
     }
 }
 
-/// An editor's bar, as the mockups: X, a title and SAVE COPY with a tick.
+/// An editor's bar, as the mockups: X, a title and SAVE COPY (or `save_label`) with a tick.
 /// Returns the close and save buttons' rectangles.
 #[allow(clippy::too_many_arguments)]
-pub fn editor_bar(gl: &Context, r: &mut Renderer, batch: &mut Batch, w: f32, top: f32, title: &str, pressed: (bool, bool), save_on: bool, d: f32) -> (Rect, Rect) {
-    let (close, save) = editor_bar_buttons(Some(r), w, top, d);
+pub fn editor_bar(gl: &Context, r: &mut Renderer, batch: &mut Batch, w: f32, top: f32, title: &str, save_label: &str, pressed: (bool, bool), save_on: bool, d: f32) -> (Rect, Rect) {
+    let (close, save) = editor_bar_buttons(Some(r), save_label, w, top, d);
     let h = 56.0 * d;
     let white = Rgba::hex(WHITE);
     batch.rect(Rect::new(0.0, 0.0, w, top + h), Rgba::hex(0x141414), 0.0);
@@ -314,13 +314,13 @@ pub fn editor_bar(gl: &Context, r: &mut Renderer, batch: &mut Batch, w: f32, top
     holo::stroke(batch, (kx, ky), (kx + 5.0 * d, ky + 5.0 * d), 2.4 * d, tick);
     holo::stroke(batch, (kx + 5.0 * d, ky + 5.0 * d), (kx + 16.0 * d, ky - 6.0 * d), 2.4 * d, tick);
     let lem = 14.0 * d;
-    r.text_spaced(gl, batch, "SAVE COPY", kx + 26.0 * d, baseline(r, cy, lem, d), lem, 0.6 * d, save.w, c, Weight::Medium);
+    r.text_spaced(gl, batch, save_label, kx + 26.0 * d, baseline(r, cy, lem, d), lem, 0.6 * d, save.w, c, Weight::Medium);
     (close, save)
 }
 
 /// Where `editor_bar` puts X and SAVE COPY (without a renderer: a fixed width).
-pub fn editor_bar_buttons(r: Option<&mut Renderer>, w: f32, top: f32, d: f32) -> (Rect, Rect) {
+pub fn editor_bar_buttons(r: Option<&mut Renderer>, save_label: &str, w: f32, top: f32, d: f32) -> (Rect, Rect) {
     let h = 56.0 * d;
-    let save_w = r.map_or(130.0 * d, |r| r.measure_spaced("SAVE COPY", 14.0 * d, 0.6 * d, Weight::Medium) + 60.0 * d);
+    let save_w = r.map_or(130.0 * d, |r| r.measure_spaced(save_label, 14.0 * d, 0.6 * d, Weight::Medium) + 60.0 * d);
     (Rect::new(0.0, top, 48.0 * d, h), Rect::new(w - save_w, top, save_w, h))
 }

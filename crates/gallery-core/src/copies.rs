@@ -49,17 +49,18 @@ fn strip_ours(base: &str) -> &str {
 }
 
 /// The folder (relative to the storage root, ending in `/`) a copy of a
-/// file in `original_rel` goes to. From Android 11 apps may only add files
-/// under the standard folders.
+/// file in `original_rel` goes to. From Android 11 apps may only add
+/// pictures under DCIM and Pictures, and videos under DCIM, Movies and Pictures.
 pub fn copy_folder(original_rel: &str, video: bool, sdk: u32) -> String {
     let rel = original_rel.trim_matches('/');
     let fallback = if video { "Movies/Edited/" } else { "Pictures/Edited/" };
     if rel.is_empty() {
         return fallback.into();
     }
-    const ROOTS: [&str; 12] = ["DCIM", "Pictures", "Movies", "Download", "Documents", "Music", "Podcasts", "Alarms", "Ringtones", "Notifications", "Audiobooks", "Recordings"];
+    // Android's media list takes pictures only under these, videos only under those.
+    let roots: &[&str] = if video { &["DCIM", "Movies", "Pictures"] } else { &["DCIM", "Pictures"] };
     let top = rel.split('/').next().unwrap_or_default();
-    if sdk < 30 || ROOTS.iter().any(|r| r.eq_ignore_ascii_case(top)) {
+    if sdk < 30 || roots.iter().any(|r| r.eq_ignore_ascii_case(top)) {
         format!("{rel}/")
     } else {
         fallback.into()
@@ -107,7 +108,11 @@ mod tests {
     fn copy_folder_keeps_standard_and_redirects_others() {
         assert_eq!(copy_folder("DCIM/Camera/", false, 34), "DCIM/Camera/");
         assert_eq!(copy_folder("Pictures/Screenshots", false, 34), "Pictures/Screenshots/");
-        assert_eq!(copy_folder("Download/", true, 34), "Download/");
+        // Android only takes pictures in DCIM and Pictures, videos in DCIM, Movies and Pictures.
+        assert_eq!(copy_folder("Download/", true, 34), "Movies/Edited/");
+        assert_eq!(copy_folder("Movies/Trips/", false, 34), "Pictures/Edited/");
+        assert_eq!(copy_folder("Movies/Trips/", true, 34), "Movies/Trips/");
+        assert_eq!(copy_folder("Pictures/Shared/", true, 34), "Pictures/Shared/");
         assert_eq!(copy_folder("Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/", false, 34), "Pictures/Edited/");
         assert_eq!(copy_folder("Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video/", true, 34), "Movies/Edited/");
         assert_eq!(copy_folder("", false, 34), "Pictures/Edited/");

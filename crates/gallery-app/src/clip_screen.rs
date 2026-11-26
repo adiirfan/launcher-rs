@@ -51,6 +51,8 @@ pub enum Action {
     Close,
     /// Saved; the new file's name.
     Saved(String),
+    /// Choosing a part for something else (a GIF): this one.
+    Picked(ClipRange),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -140,6 +142,8 @@ pub struct ClipScreen {
     note: Option<String>,
     /// The strip area last kept free of the system's Back swipe.
     excluded: Option<Rect>,
+    /// Only choosing a part (for a GIF): no CUT choices, DONE instead of SAVE COPY.
+    picking: bool,
 }
 
 /// Keep Android's edge swipes off `r` (None: give the edges back).
@@ -193,7 +197,16 @@ impl ClipScreen {
             saving: None,
             note: None,
             excluded: None,
+            picking: false,
         }
+    }
+
+    /// Choose a part of the video for something else, starting from `range`.
+    pub fn picker(app: &AndroidApp, d: f32, item: MediaItem, range: ClipRange) -> ClipScreen {
+        let mut s = ClipScreen::new(app, d, item);
+        s.range = range;
+        s.picking = true;
+        s
     }
 
     pub fn free(mut self, gl: &Context) {
@@ -400,6 +413,11 @@ impl ClipScreen {
         let lw = r.measure(&len, lem, f.w, Weight::Regular);
         r.text(gl, batch, &len, (x0 + x1 - lw) / 2.0, l.labels_y, lem, lw + 1.0, white, Weight::Regular);
 
+        if self.picking {
+            batch.rect(Rect::new(0.0, f.h - f.ins.bottom, f.w, f.ins.bottom), Rgba::hex(0x000000), 0.0);
+            self.bar = widgets::editor_bar(gl, r, batch, f.w, f.ins.top, "Choose the part", "DONE", (self.press == Some(Btn::Close), self.press == Some(Btn::Save)), true, d);
+            return self.frames.iter().any(Option::is_none) && self.generation == STRIP_GEN.load(Ordering::Acquire);
+        }
         // CUT: Exact / Instant, Keep sound.
         widgets::heading(gl, r, batch, x0, l.heading_y, x1 - x0, "CUT", "", d);
         for (i, (title, sub)) in MODES.iter().enumerate() {
@@ -439,7 +457,7 @@ impl ClipScreen {
         // Cover anything below the screen's bottom edge, then the bar.
         batch.rect(Rect::new(0.0, f.h - f.ins.bottom, f.w, f.ins.bottom), Rgba::hex(0x000000), 0.0);
         let saving = self.saving.is_some();
-        self.bar = widgets::editor_bar(gl, r, batch, f.w, f.ins.top, "Clip video", (self.press == Some(Btn::Close), self.press == Some(Btn::Save)), !saving, d);
+        self.bar = widgets::editor_bar(gl, r, batch, f.w, f.ins.top, "Clip video", "SAVE COPY", (self.press == Some(Btn::Close), self.press == Some(Btn::Save)), !saving, d);
 
         if saving {
             // Saving: everything waits under a dim layer with the progress.
@@ -477,6 +495,9 @@ impl ClipScreen {
         let l = self.lay(&f);
         if l.preview.contains(x, y) {
             return Some(Btn::Play);
+        }
+        if self.picking {
+            return None;
         }
         (0..3).find(|&i| l.rows[i].contains(x, y)).map(|i| if i == 2 { Btn::Sound } else { Btn::Mode(i) })
     }
@@ -567,6 +588,13 @@ impl ClipScreen {
     fn pressed(&mut self, b: Btn) -> Action {
         match b {
             Btn::Close => return Action::Close,
+            Btn::Save if self.picking => {
+                if self.playing {
+                    video::pause(&self.app);
+                    self.playing = false;
+                }
+                return Action::Picked(self.range);
+            }
             Btn::Save => self.start_saving(),
             Btn::Play => {
                 if !self.prepared {
