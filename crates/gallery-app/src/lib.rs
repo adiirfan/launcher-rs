@@ -15,6 +15,7 @@ mod input;
 mod library;
 mod open_with;
 mod photos;
+mod settings_screen;
 mod system;
 mod thumbs;
 mod widgets;
@@ -24,6 +25,7 @@ use std::time::{Duration, Instant};
 use android_activity::{AndroidApp, MainEvent, PollEvent};
 use gallery_core::access::Access;
 use gallery_core::arrange::Filter;
+use gallery_core::settings::GallerySettings;
 use holo_platform::gl_surface::GlSurface;
 use holo_platform::holo::BLACK;
 use holo_platform::refresh::FrameRate;
@@ -67,6 +69,12 @@ fn android_main(app: AndroidApp) {
     let d0 = app.config().density().unwrap_or(160) as f32 / 160.0;
     let mut photos = Photos::new(d0, Filter::All, None);
     let mut albums = AlbumsScreen::new(d0);
+    let mut gs = std::fs::read_to_string(settings_path(&data_dir)).map(|t| GallerySettings::from_text(&t)).unwrap_or_default();
+    apply_settings(&gs, &mut photos, None, &mut albums);
+    let mut settings: Option<settings_screen::SettingsScreen> = None;
+    // Android 12+: whether "Media management" is allowed (None: not offered).
+    let mut manage: Option<bool> = None;
+    let mut manage_stale = true;
     // An open album: the same grid with a filter and a back arrow.
     let mut album: Option<Photos> = None;
     let mut on_albums = false;
@@ -130,8 +138,12 @@ fn android_main(app: AndroidApp) {
                             g.suspend();
                         }
                     }
-                    MainEvent::Resume { .. }
-                    | MainEvent::WindowResized { .. }
+                    MainEvent::Resume { .. } => {
+                        // Back from Android's settings: it may have changed.
+                        manage_stale = true;
+                        sched.request_redraw();
+                    }
+                    MainEvent::WindowResized { .. }
                     | MainEvent::RedrawNeeded { .. }
                     | MainEvent::ContentRectChanged { .. }
                     | MainEvent::ConfigChanged { .. } => sched.request_redraw(),
@@ -192,7 +204,24 @@ fn android_main(app: AndroidApp) {
                             }
                         }
                     }
-                    other => log::info!("not built yet: {other:?}"),
+                }
+                continue;
+            }
+            if let Some(st) = settings.as_mut() {
+                let mut s = gs.clone();
+                match st.touch(t, &mut s) {
+                    settings_screen::Action::None => {}
+                    settings_screen::Action::Back => settings = None,
+                    settings_screen::Action::Changed => {
+                        log::info!("settings changed");
+                        gs = s;
+                        save_settings(&data_dir, &gs);
+                        apply_settings(&gs, &mut photos, album.as_mut(), &mut albums);
+                    }
+                    settings_screen::Action::ManageMedia => {
+                        actions::open_manage_media(&app);
+                    }
+                    settings_screen::Action::Update => holo_platform::update::tapped(&app),
                 }
                 continue;
             }
@@ -217,9 +246,16 @@ fn android_main(app: AndroidApp) {
                             let mut grid = Photos::new(photos_density(&app), a.filter, Some(a.name));
                             grid.set_items(photos.items().clone());
                             grid.set_sort(photos.sort, photos.order);
+                            grid.set_cols(gs.cols);
+                            grid.set_hidden(gs.hidden.iter().copied().collect());
                             album = Some(grid);
                         }
-                        other => log::info!("not built yet: {other:?}"),
+                        albums_screen::Action::Settings => settings = Some(settings_screen::SettingsScreen::new(photos_density(&app), photos.items())),
+                        albums_screen::Action::Hidden => {
+                            let mut st = settings_screen::SettingsScreen::new(photos_density(&app), photos.items());
+                            st.open_hidden();
+                            settings = Some(st);
+                        }
                     }
                     Action::None
                 }
@@ -233,6 +269,7 @@ fn android_main(app: AndroidApp) {
                     viewer_source = ViewerSource::Grid;
                 }
                 Action::Albums => on_albums = true,
+                Action::Settings => settings = Some(settings_screen::SettingsScreen::new(photos_density(&app), photos.items())),
                 Action::Bin => bin = Some(open_bin(&app, system_bin, photos_density(&app))),
                 Action::Share => {
                     let grid = album.as_ref().unwrap_or(&photos);
@@ -258,7 +295,6 @@ fn android_main(app: AndroidApp) {
                         library::open_settings(&app);
                     }
                 }
-                other => log::info!("not built yet: {other:?}"),
             }
         }
         if input.back {
@@ -269,6 +305,10 @@ fn android_main(app: AndroidApp) {
                     if std::mem::take(&mut outside) {
                         open_with::leave(&app);
                     }
+                }
+            } else if let Some(st) = settings.as_mut() {
+                if !st.back() {
+                    settings = None;
                 }
             } else if let Some(b) = bin.as_mut() {
                 if !b.back() {
@@ -312,6 +352,9 @@ fn android_main(app: AndroidApp) {
             if let Some(a) = album.as_mut() {
                 a.set_items(fresh.clone());
             }
+            if let Some(st) = settings.as_mut() {
+                st.set_items(&fresh);
+            }
             photos.set_items(fresh);
             viewer_list_stale = viewer.is_some() && viewer_source != ViewerSource::Foreign;
             library_seen = true;
@@ -319,6 +362,18 @@ fn android_main(app: AndroidApp) {
             sched.request_redraw();
         }
         if library::take_asked() {
+            sched.request_redraw();
+        }
+        // The grid's sort menu changed the sort: remember it.
+        if (photos.sort, photos.order) != (gs.sort, gs.order) {
+            gs.sort = photos.sort;
+            gs.order = photos.order;
+            save_settings(&data_dir, &gs);
+        }
+        if std::mem::take(&mut manage_stale) && actions::sdk(&app) >= 31 {
+            manage = Some(actions::can_manage_media(&app));
+        }
+        if holo_platform::update::take_changed() {
             sched.request_redraw();
         }
         if thumbs.has_ready() || jobs.has_done() || video::frame_waiting() || actions::has_done() {
@@ -419,6 +474,8 @@ fn android_main(app: AndroidApp) {
                 let (anim, missing) = if let Some(v) = viewer.as_mut() {
                     let pd = photo_draw.get_or_insert_with(|| photo_tex::PhotoDraw::new(g.gl()));
                     (v.draw(g.gl(), r, &mut batch, pd, &thumbs, &jobs, frame, now), Vec::new())
+                } else if let Some(st) = settings.as_mut() {
+                    st.draw(g.gl(), r, &mut batch, &thumbs, frame, &gs, manage, now)
                 } else if let Some(b) = bin.as_mut() {
                     b.draw(g.gl(), r, &mut batch, &thumbs, frame, now)
                 } else { match (album.as_mut(), on_albums) {
@@ -476,6 +533,33 @@ fn android_main(app: AndroidApp) {
         }
     }
     log::info!("android_main end");
+}
+
+holo_platform::updater_jni!(Java_dev_launcherrs_gallery_Updater_onUpdate, holo_platform::waker::wake);
+
+fn settings_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("settings.txt")
+}
+
+fn save_settings(data_dir: &std::path::Path, s: &GallerySettings) {
+    let tmp = data_dir.join("settings.tmp");
+    if std::fs::write(&tmp, s.to_text()).is_ok() {
+        let _ = std::fs::rename(&tmp, settings_path(data_dir));
+    }
+}
+
+/// Put the settings into effect on every screen that shows them.
+fn apply_settings(s: &GallerySettings, photos: &mut Photos, album: Option<&mut Photos>, albums: &mut AlbumsScreen) {
+    holo_platform::holo::set_accent(s.accent.rgb());
+    let hidden: std::collections::HashSet<i64> = s.hidden.iter().copied().collect();
+    photos.set_sort(s.sort, s.order);
+    photos.set_cols(s.cols);
+    photos.set_hidden(hidden.clone());
+    if let Some(a) = album {
+        a.set_cols(s.cols);
+        a.set_hidden(hidden.clone());
+    }
+    albums.set_hidden(hidden);
 }
 
 /// Where the open viewer's list came from.

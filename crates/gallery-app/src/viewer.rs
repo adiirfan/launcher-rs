@@ -54,14 +54,12 @@ pub enum Action {
     Share(i64),
     Delete(i64),
     Favourite(i64),
-    More(i64),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Button {
     Back,
     Star,
-    More,
     Share,
     Edit,
     Info,
@@ -594,8 +592,8 @@ impl Viewer {
         let bx = |i: f32| Rect::new(f.ins.left + q * i, by, q, BOTTOM_DP * d);
         vec![
             (Button::Back, Rect::new(0.0, top, 52.0 * d, BAR_DP * d)),
-            (Button::Star, Rect::new(f.w - 96.0 * d, top, 48.0 * d, BAR_DP * d)),
-            (Button::More, Rect::new(f.w - 48.0 * d, top, 48.0 * d, BAR_DP * d)),
+            // No ⋮ menu in 0.1: nothing for it to hold yet.
+            (Button::Star, Rect::new(f.w - 56.0 * d, top, 48.0 * d, BAR_DP * d)),
             (Button::Share, bx(0.0)),
             (Button::Edit, bx(1.0)),
             (Button::Info, bx(2.0)),
@@ -616,7 +614,7 @@ impl Viewer {
         // Top: back, when and file name, star, more.
         let top_h = self.top_h(f);
         batch.rect(Rect::new(0.0, 0.0, f.w, top_h), shade, 0.0);
-        for b in [Button::Back, Button::Star, Button::More] {
+        for b in [Button::Back, Button::Star] {
             if let Some(rc) = rect_of(b).filter(|_| pressed(b)) {
                 batch.rect(rc, accent.with_alpha(0.3), 0.0);
             }
@@ -636,9 +634,6 @@ impl Viewer {
         }
         if let Some(star) = rect_of(Button::Star) {
             star_icon(batch, star.x + star.w / 2.0 - 11.0 * d, cy - 11.0 * d, 22.0 * d, it.favourite);
-        }
-        if rect_of(Button::More).is_some() {
-            widgets::overflow(batch, f.w - 24.0 * d, cy, d);
         }
 
         // Bottom: SHARE, EDIT, INFO, DELETE.
@@ -956,7 +951,6 @@ impl Viewer {
         match b {
             Button::Back => Action::Back,
             Button::Star => Action::Favourite(id),
-            Button::More => Action::More(id),
             Button::Share => Action::Share(id),
             Button::Delete => Action::Delete(id),
             Button::Info => {

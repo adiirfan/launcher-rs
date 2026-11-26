@@ -91,6 +91,13 @@ impl AlbumsScreen {
         self.dirty = true;
     }
 
+    pub fn set_hidden(&mut self, hidden: HashSet<i64>) {
+        if hidden != self.hidden {
+            self.hidden = hidden;
+            self.dirty = true;
+        }
+    }
+
     pub fn set_density(&mut self, d: f32) {
         if d != self.d {
             self.d = d;

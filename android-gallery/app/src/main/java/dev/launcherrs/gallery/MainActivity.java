@@ -41,6 +41,7 @@ public class MainActivity extends NativeActivity {
             return v.onApplyWindowInsets(insets);
         });
         reportAccess();
+        Updater.onUpdate(Updater.IDLE, Updater.myVersion(this), 0);
         // A rebuilt activity has already shown this one.
         if (savedInstanceState == null) deliver(getIntent());
     }
@@ -49,6 +50,20 @@ public class MainActivity extends NativeActivity {
         super.onNewIntent(intent);
         setIntent(intent);
         deliver(intent);
+    }
+
+    // Called from Rust (settings).
+    public void checkForUpdate() { runOnUiThread(() -> Updater.check(this)); }
+    public void installUpdate() { runOnUiThread(() -> Updater.install(this)); }
+
+    /** Android 12+: the page where the owner lets us delete, restore and
+     *  favourite without a confirm box each time. */
+    public void openManageMedia() {
+        if (Build.VERSION.SDK_INT < 31) return;
+        try {
+            startActivity(new Intent(android.provider.Settings.ACTION_REQUEST_MANAGE_MEDIA,
+                    Uri.parse("package:" + getPackageName())));
+        } catch (Exception e) { /* no such page on this phone */ }
     }
 
     /** "Open with" from another app: hand the link to Rust. */

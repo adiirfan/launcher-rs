@@ -211,6 +211,11 @@ pub fn can_manage_media(app: &AndroidApp) -> bool {
     logged("canManageMedia", with_activity(app, |env, a| env.call_method(a, jni_str!("canManageMedia"), jni_sig!("()Z"), &[])?.z()))
 }
 
+/// Android 12+: the page where the owner allows media management.
+pub fn open_manage_media(app: &AndroidApp) {
+    logged("openManageMedia", with_activity(app, |env, a| env.call_method(a, jni_str!("openManageMedia"), jni_sig!("()V"), &[]).map(|_| ())));
+}
+
 /// Android 8-10 favourites: our own list of ids, one per line.
 pub struct Favourites {
     path: PathBuf,

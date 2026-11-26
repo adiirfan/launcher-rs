@@ -14,10 +14,11 @@ mod settings_pages;
 mod settings_screen;
 mod keyboard;
 // Shared with the gallery; re-exported so `crate::render` and friends still work.
-pub(crate) use holo_platform::{fonts, gl_surface, holo, jni_util, refresh, render, vsync};
+pub(crate) use holo_platform::{fonts, gl_surface, holo, jni_util, refresh, render, update, vsync};
+
+holo_platform::updater_jni!(Java_dev_launcherrs_app_Updater_onUpdate, crate::keyboard::wake);
 mod listener;
 mod lookup;
-mod update;
 mod system;
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};

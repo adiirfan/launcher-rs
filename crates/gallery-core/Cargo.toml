@@ -6,3 +6,4 @@ version.workspace = true
 # The gallery's logic that can be tested without a phone.
 
 [dependencies]
+launcher-core = { path = "../core" }

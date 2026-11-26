@@ -86,7 +86,7 @@ fn row_text(id: RowId, s: &Settings, access: bool) -> (&'static str, String, Opt
             "Only when you tap Check for updates, to ask GitHub for a newer version. Nothing else goes online".into(),
             None,
         ),
-        RowId::Updates => ("Check for updates", update::line(), None),
+        RowId::Updates => ("Check for updates", update::line("the launcher"), None),
     }
 }
 

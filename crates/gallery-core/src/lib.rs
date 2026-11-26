@@ -11,5 +11,6 @@ pub mod albums;
 pub mod zoom;
 pub mod viewer_list;
 pub mod selection;
+pub mod settings;
 pub mod open_with;
 pub mod own_bin;

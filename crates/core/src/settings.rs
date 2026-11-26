@@ -29,7 +29,8 @@ impl Accent {
         }
     }
 
-    fn word(self) -> &'static str {
+    /// Its word in a settings file.
+    pub fn word(self) -> &'static str {
         match self {
             Accent::Blue => "blue",
             Accent::Purple => "purple",

@@ -233,6 +233,12 @@ impl Photos {
         }
     }
 
+    /// The grid size from settings (0: from the screen width). Pinching
+    /// still changes it until the next start.
+    pub fn set_cols(&mut self, cols: u32) {
+        self.pinched = (cols > 0).then_some(cols);
+    }
+
     pub fn columns(&self) -> u32 {
         self.spec.cols
     }

@@ -207,6 +207,9 @@ dependencies = [
 [[package]]
 name = "gallery-core"
 version = "0.1.0"
+dependencies = [
+ "launcher-core",
+]
 
 [[package]]
 name = "getrandom"
