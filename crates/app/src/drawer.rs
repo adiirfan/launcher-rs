@@ -78,6 +78,9 @@ struct Slide {
 pub struct Drawer {
     /// 0 = hidden, 1 = fully open; `slide` animates between them.
     shown: f32,
+    /// An app was started from the list: keep showing it while the app
+    /// opens over us, and close it once we are fully hidden.
+    close_when_hidden: bool,
     slide: Option<Slide>,
     query: String,
     focused: bool,
@@ -123,6 +126,7 @@ impl Drawer {
             permission: Permission::Unknown,
             recheck: false,
             scroller: Scroller::new(8.0 * density, density),
+            close_when_hidden: false,
             metrics: None,
             pressed: None,
             press: LongPress::new(LONG_PRESS, 12.0 * density),
@@ -169,6 +173,30 @@ impl Drawer {
         self.focused = focus;
         self.scroller.reset();
         self.permission = Permission::Unknown;
+    }
+
+    /// An app is opening over the list: leave the list on screen until the
+    /// launcher is hidden, so Home never flashes up in between.
+    pub fn launched(&mut self) {
+        self.close_when_hidden = true;
+        self.pressed = None;
+        self.press.cancel();
+        self.press_at = None;
+    }
+
+    /// The launcher is fully covered. Returns true if the list closed.
+    pub fn hidden(&mut self, now: Instant) -> bool {
+        if !std::mem::take(&mut self.close_when_hidden) {
+            return false;
+        }
+        self.close(now, false);
+        true
+    }
+
+    /// The launcher is back in front before it was ever hidden (the app
+    /// didn't open after all): keep the list as it is.
+    pub fn shown_again(&mut self) {
+        self.close_when_hidden = false;
     }
 
     /// Slide away (or vanish at once, after launching an app) and forget the search.
