@@ -41,7 +41,7 @@ const SEEK_EVERY: Duration = Duration::from_millis(120);
 const CANT_EXACT: &str = "This video can't be re-saved exactly; use Instant";
 
 const MODES: [(&str, &str); 2] = [
-    ("Exact", "Cuts right where you put the handles. Takes a few seconds for each minute of video."),
+    ("Exact", "Cuts right where you put the handles. Up to half a minute for each minute of video."),
     ("Instant", "No quality loss and done at once, but it may start up to 2 seconds early."),
 ];
 

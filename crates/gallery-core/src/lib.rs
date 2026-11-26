@@ -10,6 +10,7 @@ pub mod grid;
 pub mod thumbq;
 pub mod format;
 pub mod albums;
+pub mod back;
 pub mod copies;
 pub mod crop;
 pub mod gif_plan;

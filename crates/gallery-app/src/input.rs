@@ -37,6 +37,7 @@ pub struct Input {
 /// Android 13+ sends Back (the gesture or the button) to a callback in
 /// Java rather than as a key press; it lands here.
 static BACK: AtomicBool = AtomicBool::new(false);
+static GATE: std::sync::Mutex<gallery_core::back::BackGate> = std::sync::Mutex::new(gallery_core::back::BackGate::new());
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_launcherrs_gallery_MainActivity_onBack<'l>(_env: jni::EnvUnowned<'l>, _class: jni::objects::JClass<'l>) {
@@ -48,6 +49,18 @@ pub extern "system" fn Java_dev_launcherrs_gallery_MainActivity_onBack<'l>(_env:
 /// Touches keep the time Android stamped on them, so swipe speed is right
 /// even when several arrive in one batch.
 pub fn drain(app: &AndroidApp) -> Input {
+    let mut out = drain_raw(app);
+    if out.back {
+        let now_ms = (monotonic_ns(libc::CLOCK_MONOTONIC) / 1_000_000).max(0) as u64;
+        out.back = GATE.lock().unwrap().pass(now_ms);
+        if !out.back {
+            log::info!("back: second copy of one press ignored");
+        }
+    }
+    out
+}
+
+fn drain_raw(app: &AndroidApp) -> Input {
     let mut out = Input { back: BACK.swap(false, Ordering::AcqRel), ..Input::default() };
     let Ok(mut iter) = app.input_events_iter() else { return out };
     let (now, mono_now) = (Instant::now(), monotonic_ns(libc::CLOCK_MONOTONIC));
