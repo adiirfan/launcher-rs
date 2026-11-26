@@ -204,3 +204,30 @@ pub extern "system" fn Java_dev_launcherrs_gallery_MainActivity_onAccess<'l>(
     WORK.notify_one();
     waker::wake();
 }
+
+/// What's in Android's own Bin (Android 11+), read now. Empty on older
+/// Android or on failure.
+pub fn query_trashed(app: &AndroidApp) -> Vec<MediaItem> {
+    let bytes = with_activity(app, |env, activity| {
+        let array = env.call_method(activity, jni_str!("queryLibrary"), jni_sig!("(Z)[B"), &[JValue::Bool(true)])?.l()?;
+        let array = env.cast_local::<JByteArray>(array)?;
+        env.convert_byte_array(&array)
+    });
+    match bytes.map(|b| parse_records(&b)) {
+        Ok(Ok(items)) => items,
+        Ok(Err(e)) => {
+            log::warn!("bin: unreadable list {e:?}");
+            Vec::new()
+        }
+        Err(e) => {
+            log::warn!("bin: query failed {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// Ask for the list again (after our own bin moved files on Android 8-10,
+/// where Android's change notice can come late).
+pub fn refresh() {
+    mark_dirty();
+}

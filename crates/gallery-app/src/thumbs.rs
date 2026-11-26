@@ -21,6 +21,18 @@ const WORKERS: usize = 2;
 /// Finished thumbnails waiting for the main loop; more waits in the queue.
 const READY_MAX: usize = 24;
 
+/// Files Android no longer lists (our own bin on Android 8-10) have
+/// negative ids; their thumbnails come from the file itself.
+static PATHS: Mutex<Option<HashMap<i64, String>>> = Mutex::new(None);
+
+pub fn set_paths(paths: HashMap<i64, String>) {
+    *PATHS.lock().unwrap() = Some(paths);
+}
+
+fn path_of(id: i64) -> Option<String> {
+    PATHS.lock().unwrap().as_ref()?.get(&id).cloned()
+}
+
 pub fn key(id: i64) -> String {
     format!("t{id}")
 }
@@ -123,15 +135,22 @@ fn work(shared: Arc<(Mutex<State>, Condvar)>) {
             }
         };
         let t = Instant::now();
+        let path = if id < 0 { path_of(id) } else { None };
         let pixels = with_activity(&app, |env, activity| {
-            let array = env
-                .call_method(
-                    activity,
-                    jni_str!("loadThumb"),
-                    jni_sig!("(JZII)[B"),
-                    &[JValue::Long(id), JValue::Bool(video), JValue::Int(orientation as i32), JValue::Int(SIZE as i32)],
-                )?
-                .l()?;
+            let array = match &path {
+                Some(p) => {
+                    let p = env.new_string(p)?;
+                    env.call_method(activity, jni_str!("loadThumbPath"), jni_sig!("(Ljava/lang/String;ZI)[B"), &[JValue::Object(&p), JValue::Bool(video), JValue::Int(SIZE as i32)])?.l()?
+                }
+                None => env
+                    .call_method(
+                        activity,
+                        jni_str!("loadThumb"),
+                        jni_sig!("(JZII)[B"),
+                        &[JValue::Long(id), JValue::Bool(video), JValue::Int(orientation as i32), JValue::Int(SIZE as i32)],
+                    )?
+                    .l()?,
+            };
             if array.is_null() {
                 return Ok(None);
             }

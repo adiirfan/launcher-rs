@@ -1,7 +1,9 @@
 //! Holo Gallery's Android entry point. Everything here is Android-only.
 #![cfg(target_os = "android")]
 
+mod actions;
 mod albums_screen;
+mod bin_screen;
 mod bars;
 mod gif_player;
 mod photo_tex;
@@ -52,7 +54,14 @@ fn android_main(app: AndroidApp) {
     // the refresh callback must point at this one.
     waker::init(&app);
     let data_dir = app.internal_data_path().unwrap_or_else(|| std::path::PathBuf::from("/data/local/tmp"));
-    library::start(&app, data_dir);
+    library::start(&app, data_dir.clone());
+    // Android 8-10: our own bin, and our own favourites list.
+    let system_bin = actions::system_bin(&app);
+    let mut favs = actions::Favourites::load(&data_dir);
+    if !system_bin {
+        actions::purge_expired(&app, actions::now_ms());
+    }
+    let mut bin: Option<bin_screen::BinScreen> = None;
     let thumbs = Thumbs::new(&app);
     let d0 = app.config().density().unwrap_or(160) as f32 / 160.0;
     let mut photos = Photos::new(d0, Filter::All, None);
@@ -132,10 +141,48 @@ fn android_main(app: AndroidApp) {
         }
         for t in input.touches {
             if let Some(v) = viewer.as_mut() {
-                match v.touch(t) {
+                let act = v.touch(t);
+                let item = |id: i64| photos.items().iter().find(|i| i.id == id).cloned();
+                match act {
                     viewer::Action::None => {}
                     viewer::Action::Back => closed.extend(viewer.take()),
+                    viewer::Action::Share(id) => {
+                        if let Some(it) = item(id) {
+                            actions::share(&app, &[(id, it.kind == gallery_core::media::Kind::Video)]);
+                        }
+                    }
+                    viewer::Action::Delete(id) => {
+                        if let Some(it) = item(id) {
+                            trash(&app, system_bin, &[(id, it.kind == gallery_core::media::Kind::Video)]);
+                        }
+                    }
+                    viewer::Action::Favourite(id) => {
+                        if let Some(it) = item(id) {
+                            if system_bin {
+                                actions::request(&app, actions::Op::Favourite, &[(id, it.kind == gallery_core::media::Kind::Video)], !it.favourite);
+                            } else {
+                                favs.set(id, !it.favourite);
+                                let fresh = with_favourites(photos.items(), &favs);
+                                albums.set_items(fresh.clone());
+                                if let Some(a) = album.as_mut() {
+                                    a.set_items(fresh.clone());
+                                }
+                                photos.set_items(fresh);
+                                viewer_list_stale = true;
+                            }
+                        }
+                    }
                     other => log::info!("not built yet: {other:?}"),
+                }
+                continue;
+            }
+            if let Some(b) = bin.as_mut() {
+                match b.touch(t) {
+                    bin_screen::Action::None => {}
+                    bin_screen::Action::Back => bin = None,
+                    bin_screen::Action::Restore => bin_op(&app, system_bin, b, actions::Op::Restore, false),
+                    bin_screen::Action::DeleteForever => bin_op(&app, system_bin, b, actions::Op::Delete, false),
+                    bin_screen::Action::Empty => bin_op(&app, system_bin, b, actions::Op::Delete, true),
                 }
                 continue;
             }
@@ -145,6 +192,7 @@ fn android_main(app: AndroidApp) {
                     match albums.touch(t) {
                         albums_screen::Action::None => {}
                         albums_screen::Action::Photos => on_albums = false,
+                        albums_screen::Action::Bin => bin = Some(open_bin(&app, system_bin, photos_density(&app))),
                         albums_screen::Action::Open(a) => {
                             let mut grid = Photos::new(photos_density(&app), a.filter, Some(a.name));
                             grid.set_items(photos.items().clone());
@@ -164,6 +212,19 @@ fn android_main(app: AndroidApp) {
                     viewer = Some(Viewer::open(&app, photos_density(&app), grid.items().clone(), grid.arranged().order.clone(), i as usize, screen_w));
                 }
                 Action::Albums => on_albums = true,
+                Action::Bin => bin = Some(open_bin(&app, system_bin, photos_density(&app))),
+                Action::Share => {
+                    let grid = album.as_ref().unwrap_or(&photos);
+                    actions::share(&app, &grid.chosen());
+                }
+                Action::Delete => {
+                    let grid = album.as_mut().unwrap_or(&mut photos);
+                    trash(&app, system_bin, &grid.chosen());
+                    // Android 11+ asks first; the choice ends when it's done.
+                    if !system_bin {
+                        grid.end_selection();
+                    }
+                }
                 Action::Back => {
                     if let Some(a) = album.take() {
                         photos.set_sort(a.sort, a.order);
@@ -185,6 +246,10 @@ fn android_main(app: AndroidApp) {
                 if !v.back() {
                     closed.extend(viewer.take());
                 }
+            } else if let Some(b) = bin.as_mut() {
+                if !b.back() {
+                    bin = None;
+                }
             } else if let Some(a) = album.as_mut() {
                 if !a.back() {
                     let a = album.take().unwrap();
@@ -196,8 +261,29 @@ fn android_main(app: AndroidApp) {
                 system::finish(&app);
             }
         }
+        for (op, ok) in actions::take_done() {
+            log::info!("media action {op:?}: {}", if ok { "done" } else { "not done" });
+            sched.request_redraw();
+            if !ok {
+                continue;
+            }
+            if op == actions::Op::Trash {
+                photos.end_selection();
+                if let Some(a) = album.as_mut() {
+                    a.end_selection();
+                }
+            }
+            if let Some(b) = bin.as_mut() {
+                b.clear_selection();
+                b.set_items(bin_items(&app, system_bin));
+            }
+        }
         if let Some(fresh) = library::take_update() {
             log::info!("showing {} items", fresh.len());
+            let fresh = if system_bin { fresh } else { with_favourites(&fresh, &favs) };
+            if let Some(b) = bin.as_mut() {
+                b.set_items(bin_items(&app, system_bin));
+            }
             albums.set_items(fresh.clone());
             if let Some(a) = album.as_mut() {
                 a.set_items(fresh.clone());
@@ -210,7 +296,7 @@ fn android_main(app: AndroidApp) {
         if library::take_asked() {
             sched.request_redraw();
         }
-        if thumbs.has_ready() || jobs.has_done() || video::frame_waiting() {
+        if thumbs.has_ready() || jobs.has_done() || video::frame_waiting() || actions::has_done() {
             sched.request_redraw();
         }
 
@@ -279,6 +365,8 @@ fn android_main(app: AndroidApp) {
                 let (anim, missing) = if let Some(v) = viewer.as_mut() {
                     let pd = photo_draw.get_or_insert_with(|| photo_tex::PhotoDraw::new(g.gl()));
                     (v.draw(g.gl(), r, &mut batch, pd, &thumbs, &jobs, frame, now), Vec::new())
+                } else if let Some(b) = bin.as_mut() {
+                    b.draw(g.gl(), r, &mut batch, &thumbs, frame, now)
                 } else { match (album.as_mut(), on_albums) {
                     (Some(a), _) => {
                         a.set_density(d);
@@ -338,4 +426,102 @@ fn android_main(app: AndroidApp) {
 
 fn photos_density(app: &AndroidApp) -> f32 {
     app.config().density().unwrap_or(160) as f32 / 160.0
+}
+
+/// Into the Bin: Android's on 11+ (it may ask first), ours on 8-10.
+fn trash(app: &AndroidApp, system_bin: bool, items: &[(i64, bool)]) {
+    if items.is_empty() {
+        return;
+    }
+    if system_bin {
+        actions::request(app, actions::Op::Trash, items, true);
+    } else {
+        let n = actions::trash_legacy(app, items);
+        log::info!("bin: moved {n} of {}", items.len());
+        library::refresh();
+    }
+}
+
+fn open_bin(app: &AndroidApp, system_bin: bool, d: f32) -> bin_screen::BinScreen {
+    let mut b = bin_screen::BinScreen::new(d);
+    b.set_items(bin_items(app, system_bin));
+    b
+}
+
+/// What the Bin holds. On Android 8-10 our own list, as items with
+/// negative ids whose thumbnails come from the stored files.
+fn bin_items(app: &AndroidApp, system_bin: bool) -> Vec<gallery_core::media::MediaItem> {
+    use gallery_core::media::{Kind, MediaItem};
+    if system_bin {
+        return library::query_trashed(app);
+    }
+    let entries = actions::own_bin(app);
+    let mut paths = std::collections::HashMap::new();
+    let items = entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let id = -(i as i64) - 1;
+            paths.insert(id, e.stored.clone());
+            let orig = std::path::Path::new(&e.original_path);
+            let name = orig.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let ext = orig.extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default();
+            let kind = match ext.as_str() {
+                "mp4" | "3gp" | "mkv" | "webm" | "mov" => Kind::Video,
+                "gif" => Kind::Gif,
+                _ => Kind::Image,
+            };
+            MediaItem {
+                id,
+                kind,
+                w: 0,
+                h: 0,
+                orientation: 0,
+                duration_ms: 0,
+                size: std::fs::metadata(&e.stored).map_or(0, |m| m.len()),
+                taken_ms: e.deleted_ms,
+                modified_ms: e.deleted_ms,
+                added_ms: e.deleted_ms,
+                favourite: false,
+                bucket_id: 0,
+                name,
+                folder: orig.parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                mime: String::new(),
+                expires_ms: e.deleted_ms + gallery_core::own_bin::KEEP_MS,
+            }
+        })
+        .collect();
+    thumbs::set_paths(paths);
+    items
+}
+
+/// RESTORE, DELETE FOREVER, or (`everything`) EMPTY BIN.
+fn bin_op(app: &AndroidApp, system_bin: bool, b: &mut bin_screen::BinScreen, op: actions::Op, everything: bool) {
+    let chosen = if everything { b.all() } else { b.chosen() };
+    if chosen.is_empty() {
+        return;
+    }
+    if system_bin {
+        actions::request(app, op, &chosen, false);
+        return;
+    }
+    let entries = actions::own_bin(app);
+    let which: Vec<gallery_core::own_bin::BinEntry> = chosen.iter().filter_map(|&(id, _)| entries.get((-id - 1) as usize).cloned()).collect();
+    if op == actions::Op::Restore {
+        actions::restore_legacy(app, &which);
+        library::refresh();
+    } else {
+        actions::delete_legacy(app, &which);
+    }
+    b.clear_selection();
+    b.set_items(bin_items(app, system_bin));
+}
+
+/// Android 8-10: our favourites list laid over Android's list.
+fn with_favourites(items: &std::sync::Arc<Vec<gallery_core::media::MediaItem>>, favs: &actions::Favourites) -> std::sync::Arc<Vec<gallery_core::media::MediaItem>> {
+    let mut v = (**items).clone();
+    for it in &mut v {
+        it.favourite = favs.ids.contains(&it.id);
+    }
+    std::sync::Arc::new(v)
 }

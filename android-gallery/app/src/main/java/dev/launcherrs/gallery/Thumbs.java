@@ -26,10 +26,17 @@ final class Thumbs {
     /** `size`×`size` RGBA (premultiplied, as Android keeps it), centre-cropped
      *  and turned upright; null when Android has none. */
     static byte[] load(Context c, long id, boolean video, int orientation, int size) {
+        return load(c, id, null, video, orientation, size);
+    }
+
+    /** With `path` set: a file Android no longer lists (in our own bin). */
+    static byte[] load(Context c, long id, String path, boolean video, int orientation, int size) {
         Bitmap b = null, out = null;
         try {
             ContentResolver cr = c.getContentResolver();
-            if (Build.VERSION.SDK_INT >= 29) {
+            if (path != null) {
+                b = MediaActions.thumbForPath(path, video);
+            } else if (Build.VERSION.SDK_INT >= 29) {
                 // Android 10+ hands these back already upright.
                 b = cr.loadThumbnail(uri(id, video), new Size(size, size), null);
                 orientation = 0;

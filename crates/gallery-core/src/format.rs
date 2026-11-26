@@ -7,7 +7,7 @@ pub fn duration(ms: u64) -> String {
     if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
 }
 
-fn grouped(n: usize) -> String {
+pub fn grouped(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {

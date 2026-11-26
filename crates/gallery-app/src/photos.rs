@@ -12,6 +12,7 @@ use gallery_core::dates::CivilDate;
 use gallery_core::format;
 use gallery_core::grid::{default_cols, lay_out, pinch_cols, Grid, GridSpec, Row};
 use gallery_core::media::{Kind, MediaItem};
+use gallery_core::selection::Selection;
 use glow::Context;
 use holo_platform::fonts::Weight;
 use holo_platform::holo::{self, BLACK, TEXT_QUIET, WHITE};
@@ -32,6 +33,10 @@ const BOTTOM_PAD_DP: f32 = 24.0;
 /// The fast-scroll handle shows while scrolling and this long after.
 const FAST_LINGER: Duration = Duration::from_millis(1500);
 const FAST_W_DP: f32 = 40.0;
+/// Holding a tile this long starts choosing.
+const LONG_PRESS: Duration = Duration::from_millis(450);
+const SEL_BOTTOM_DP: f32 = 64.0;
+const DONE_W_DP: f32 = 104.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
@@ -40,10 +45,12 @@ pub enum Action {
     Open(u32),
     Albums,
     Back,
-    Select,
     Bin,
     Settings,
     AskAccess,
+    /// Share or delete what's chosen (`chosen()`).
+    Share,
+    Delete,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -61,6 +68,10 @@ enum Press {
     Back,
     MenuRow(usize),
     Button,
+    SelDone,
+    SelAll,
+    SelShare,
+    SelDelete,
 }
 
 struct Pinch {
@@ -108,6 +119,13 @@ pub struct Photos {
     fast_drag: bool,
     last: Option<Frame>,
     pub glow: bool,
+    /// Choosing several (after a long press, or More → Select).
+    selecting: bool,
+    selection: Selection,
+    /// A finger is down on the grid and may become a long press.
+    long_press: Option<(Instant, f32, f32)>,
+    /// A long press became a drag: it chooses the run from this position.
+    drag_from: Option<usize>,
 }
 
 impl Photos {
@@ -139,12 +157,48 @@ impl Photos {
             fast_drag: false,
             last: None,
             glow: true,
+            selecting: false,
+            selection: Selection::default(),
+            long_press: None,
+            drag_from: None,
         }
     }
 
     pub fn set_items(&mut self, items: Arc<Vec<MediaItem>>) {
+        let alive: HashSet<i64> = items.iter().map(|i| i.id).collect();
+        self.selection.retain(|id| alive.contains(&id));
         self.items = items;
         self.dirty = true;
+    }
+
+    /// The chosen items in selection mode: id, video?
+    pub fn chosen(&self) -> Vec<(i64, bool)> {
+        let ids: HashSet<i64> = self.selection.ids().into_iter().collect();
+        self.items.iter().filter(|i| ids.contains(&i.id)).map(|i| (i.id, i.kind == Kind::Video)).collect()
+    }
+
+    pub fn end_selection(&mut self) {
+        self.selecting = false;
+        self.selection.clear();
+        self.drag_from = None;
+    }
+
+    pub fn selecting(&self) -> bool {
+        self.selecting
+    }
+
+    fn ids_in_order(&self) -> Vec<i64> {
+        self.arranged.order.iter().map(|&i| self.items[i as usize].id).collect()
+    }
+
+    /// The position in display order under screen point `x, y`.
+    fn index_at(&self, x: f32, y: f32, now: Instant) -> Option<usize> {
+        let f = self.last?;
+        let top = self.top(&f);
+        if y < top || y >= self.bottom(&f) {
+            return None;
+        }
+        self.grid.item_at(x - f.ins.left, y - top + self.scroller.offset(now), &self.spec).map(|i| i as usize)
     }
 
     pub fn items(&self) -> &Arc<Vec<MediaItem>> {
@@ -184,11 +238,11 @@ impl Photos {
     }
 
     fn top(&self, f: &Frame) -> f32 {
-        f.ins.top + BAR_DP * self.d + if self.title.is_none() { TABS_DP * self.d } else { 0.0 }
+        f.ins.top + BAR_DP * self.d + if self.title.is_none() && !self.selecting { TABS_DP * self.d } else { 0.0 }
     }
 
     fn bottom(&self, f: &Frame) -> f32 {
-        f.h - f.ins.bottom
+        f.h - f.ins.bottom - if self.selecting { SEL_BOTTOM_DP * self.d } else { 0.0 }
     }
 
     fn view_h(&self, f: &Frame) -> f32 {
@@ -229,9 +283,28 @@ impl Photos {
         let d = self.d;
         self.last = Some(f);
         self.relayout(&f, now);
-        let (top, bottom) = (self.top(&f), self.bottom(&f));
         let mut missing = Vec::new();
-        let mut moving = self.scroller.animating(now) || self.pinch.is_some();
+        // A finger held still on a tile: start choosing, from that tile.
+        if let Some((t0, x, y)) = self.long_press
+            && now >= t0 + LONG_PRESS
+        {
+            self.long_press = None;
+            if let Some(i) = self.index_at(x, y, now) {
+                self.selecting = true;
+                self.scroller.touch_cancel(now);
+                let ids = self.ids_in_order();
+                self.selection.end_drag();
+                if self.selection.contains(ids[i]) {
+                    // Holding a chosen one un-chooses it, and drags nothing.
+                    self.selection.toggle(ids[i]);
+                } else {
+                    self.selection.drag_range(&ids, i, i);
+                    self.drag_from = Some(i);
+                }
+            }
+        }
+        let (top, bottom) = (self.top(&f), self.bottom(&f));
+        let mut moving = self.scroller.animating(now) || self.pinch.is_some() || self.long_press.is_some();
         let x0 = f.ins.left;
 
         if access != Access::Full && self.items.is_empty() || access == Access::None {
@@ -269,6 +342,13 @@ impl Photos {
                                         missing.push((item.id, item.kind == Kind::Video, item.orientation));
                                     }
                                 }
+                            }
+                            if self.selecting {
+                                let on = self.selection.contains(item.id);
+                                if on {
+                                    batch.outline(rect, Rgba::hex(holo::accent()), 0.0, 3.0 * d);
+                                }
+                                widgets::checkbox(batch, rect.x + rect.w - 30.0 * d, rect.y + 4.0 * d, 26.0 * d, on);
                             }
                             match item.kind {
                                 Kind::Video => widgets::badge(gl, r, batch, rect.x + rect.w, rect.y + rect.h, &format::duration(item.duration_ms), true, d),
@@ -335,6 +415,11 @@ impl Photos {
         // Bars on top of whatever scrolled behind them.
         batch.rect(Rect::new(0.0, bottom, f.w, f.h - bottom), Rgba::hex(BLACK), 0.0);
         let bar_top = f.ins.top;
+        if self.selecting {
+            self.draw_select_bars(gl, r, batch, &f);
+            self.menu = Menu::None;
+            return (moving, missing);
+        }
         match &self.title {
             None => {
                 chrome::action_bar(gl, r, batch, f.w, bar_top, "Gallery", d);
@@ -382,6 +467,55 @@ impl Photos {
             }
         }
         (moving, missing)
+    }
+
+    /// Selection mode, as the mockup: DONE, "3 selected", ALL; SHARE, DELETE.
+    fn draw_select_bars(&self, gl: &Context, r: &mut Renderer, batch: &mut Batch, f: &Frame) {
+        let d = self.d;
+        let accent = Rgba::hex(holo::accent());
+        let white = Rgba::hex(WHITE);
+        let top = f.ins.top;
+        let h = BAR_DP * d;
+        batch.rect(Rect::new(0.0, 0.0, f.w, top + h), Rgba::hex(holo::BAR), 0.0);
+        batch.rect(Rect::new(0.0, top + h - 2.0 * d, f.w, 2.0 * d), accent, 0.0);
+        let pressed = |p: Press| self.press == Some(p);
+        if pressed(Press::SelDone) {
+            batch.rect(Rect::new(0.0, top, DONE_W_DP * d, h - 2.0 * d), accent.with_alpha(0.3), 0.0);
+        }
+        if pressed(Press::SelAll) {
+            batch.rect(Rect::new(f.w - 72.0 * d, top, 72.0 * d, h - 2.0 * d), accent.with_alpha(0.3), 0.0);
+        }
+        let cy = top + h / 2.0;
+        // The check mark, then DONE, then a divider.
+        let u = 22.0 * d / 24.0;
+        let (ix, iy) = (14.0 * d, cy - 11.0 * d);
+        holo::stroke(batch, (ix + 4.0 * u, iy + 12.0 * u), (ix + 9.0 * u, iy + 17.0 * u), 2.4 * u, white);
+        holo::stroke(batch, (ix + 9.0 * u, iy + 17.0 * u), (ix + 20.0 * u, iy + 6.0 * u), 2.4 * u, white);
+        let em = 14.0 * d;
+        r.text_spaced(gl, batch, "DONE", 44.0 * d, widgets::baseline(r, cy, em, d), em, 0.6 * d, 60.0 * d, white, Weight::Medium);
+        batch.rect(Rect::new(DONE_W_DP * d, top, 1.0 * d, h - 2.0 * d), Rgba::hex(holo::DIVIDER), 0.0);
+        let n = self.selection.count();
+        let title = if n == 0 { "Choose items".to_string() } else { format!("{} selected", format::grouped(n)) };
+        r.text(gl, batch, &title, DONE_W_DP * d + 16.0 * d, widgets::baseline(r, cy, 20.0 * d, d), 20.0 * d, f.w - DONE_W_DP * d - 100.0 * d, white, Weight::Regular);
+        let aw = r.measure_spaced("ALL", em, 0.6 * d, Weight::Medium);
+        r.text_spaced(gl, batch, "ALL", f.w - 16.0 * d - aw, widgets::baseline(r, cy, em, d), em, 0.6 * d, aw + 1.0, white, Weight::Medium);
+
+        // Bottom: SHARE and DELETE (MOVE and CONVERT come in later versions).
+        let by = self.bottom(f);
+        batch.rect(Rect::new(0.0, by, f.w, f.h - by), Rgba::hex(holo::BAR), 0.0);
+        batch.rect(Rect::new(0.0, by, f.w, 1.0 * d), Rgba::hex(holo::DIVIDER), 0.0);
+        let half = f.w / 2.0;
+        let dim = if n == 0 { Rgba::hex(0x6E6E6E) } else { white };
+        for (i, (p, label)) in [(Press::SelShare, "SHARE"), (Press::SelDelete, "DELETE")].into_iter().enumerate() {
+            let x = half * i as f32;
+            if pressed(p) {
+                batch.rect(Rect::new(x, by, half, SEL_BOTTOM_DP * d), accent.with_alpha(0.3), 0.0);
+            }
+            widgets::action_icon(batch, label, x + half / 2.0 - 11.0 * d, by + 12.0 * d, 22.0 * d, dim);
+            let lem = 12.0 * d;
+            let lw = r.measure_spaced(label, lem, 0.6 * d, Weight::Medium);
+            r.text_spaced(gl, batch, label, x + (half - lw) / 2.0, by + 50.0 * d, lem, 0.6 * d, half, dim, Weight::Medium);
+        }
     }
 
     fn draw_no_access(&mut self, gl: &Context, r: &mut Renderer, batch: &mut Batch, f: &Frame, access: Access, top: f32) {
@@ -437,6 +571,21 @@ impl Photos {
         }
         let bar_top = f.ins.top;
         let bar_bottom = bar_top + BAR_DP * d;
+        if self.selecting {
+            if y >= bar_top && y < bar_bottom {
+                if x < DONE_W_DP * d {
+                    return Some(Press::SelDone);
+                }
+                if x >= f.w - 72.0 * d {
+                    return Some(Press::SelAll);
+                }
+                return None;
+            }
+            if y >= self.bottom(f) && y < f.h - f.ins.bottom {
+                return Some(if x < f.w / 2.0 { Press::SelShare } else { Press::SelDelete });
+            }
+            return None;
+        }
         if y >= bar_top && y < bar_bottom {
             if x >= f.w - 48.0 * d {
                 return Some(Press::Overflow);
@@ -491,9 +640,11 @@ impl Photos {
                 }
                 if t.y >= top {
                     self.scroller.touch_down(t.x, t.y, t.t);
+                    self.long_press = Some((t.t, t.x, t.y));
                 }
             }
             TouchKind::SecondDown => {
+                self.long_press = None;
                 if let Some(p) = t.second.filter(|_| self.press.is_none() && !self.fast_drag) {
                     self.scroller.touch_cancel(t.t);
                     self.eaten = true;
@@ -519,6 +670,16 @@ impl Photos {
                 if self.eaten {
                     return Action::None;
                 }
+                if let Some(from) = self.drag_from {
+                    if let Some(i) = self.index_at(t.x, t.y, t.t) {
+                        let ids = self.ids_in_order();
+                        self.selection.drag_range(&ids, from, i);
+                    }
+                    return Action::None;
+                }
+                if self.long_press.is_some_and(|(_, x, y)| (t.x - x).hypot(t.y - y) > 8.0 * d) {
+                    self.long_press = None;
+                }
                 if self.fast_drag {
                     self.fast_jump(t.y, &f);
                     return Action::None;
@@ -536,6 +697,12 @@ impl Photos {
             }
             TouchKind::Up => {
                 self.pinch = None;
+                self.long_press = None;
+                if self.drag_from.take().is_some() {
+                    self.selection.end_drag();
+                    self.scroller.touch_cancel(t.t);
+                    return Action::None;
+                }
                 if std::mem::take(&mut self.eaten) {
                     self.press = None;
                     self.scroller.touch_cancel(t.t);
@@ -553,11 +720,19 @@ impl Photos {
                 {
                     let cy = y - top + self.scroller.offset(t.t);
                     if let Some(i) = self.grid.item_at(x - f.ins.left, cy, &self.spec) {
+                        if self.selecting {
+                            let id = self.items[self.arranged.order[i as usize] as usize].id;
+                            self.selection.toggle(id);
+                            return Action::None;
+                        }
                         return Action::Open(i);
                     }
                 }
             }
             TouchKind::Cancel => {
+                self.long_press = None;
+                self.drag_from = None;
+                self.selection.end_drag();
                 self.pinch = None;
                 self.press = None;
                 self.eaten = false;
@@ -589,6 +764,18 @@ impl Photos {
                 Action::None
             }
             Press::Button => Action::AskAccess,
+            Press::SelDone => {
+                self.end_selection();
+                Action::None
+            }
+            Press::SelAll => {
+                let ids = self.ids_in_order();
+                self.selection.select_all(&ids);
+                Action::None
+            }
+            Press::SelShare if self.selection.count() > 0 => Action::Share,
+            Press::SelDelete if self.selection.count() > 0 => Action::Delete,
+            Press::SelShare | Press::SelDelete => Action::None,
             Press::MenuRow(i) => match self.menu {
                 Menu::Sort => {
                     match self.sort_rows().get(i).and_then(|r| r.1) {
@@ -605,7 +792,10 @@ impl Photos {
                 Menu::More => {
                     self.menu = Menu::None;
                     match i {
-                        0 => Action::Select,
+                        0 => {
+                            self.selecting = true;
+                            Action::None
+                        }
                         1 => Action::Bin,
                         _ => Action::Settings,
                     }
@@ -623,6 +813,10 @@ impl Photos {
 
     /// Back: close a menu if one is open. Returns whether it did something.
     pub fn back(&mut self) -> bool {
+        if self.selecting {
+            self.end_selection();
+            return true;
+        }
         if self.menu != Menu::None {
             self.menu = Menu::None;
             return true;

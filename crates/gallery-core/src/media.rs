@@ -25,6 +25,8 @@ pub struct MediaItem {
     pub name: String,
     pub folder: String,
     pub mime: String,
+    /// In the Bin: when it goes for good. 0 otherwise.
+    pub expires_ms: i64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -43,12 +45,12 @@ impl MediaItem {
     }
 }
 
-const MAGIC: &[u8; 4] = b"HGL1";
+const MAGIC: &[u8; 4] = b"HGL2";
 
-/// Little-endian: `HGL1`, u32 count, then per record: i64 id, u8 kind
+/// Little-endian: `HGL2`, u32 count, then per record: i64 id, u8 kind
 /// (0 image, 1 video, 2 gif), u32 w, u32 h, u16 orientation, u64 duration_ms,
 /// u64 size, i64 taken_ms, i64 modified_ms, i64 added_ms, u8 flags (bit 0
-/// favourite), i64 bucket_id, then name, folder and mime, each a u16 byte
+/// favourite), i64 bucket_id, i64 expires_ms, then name, folder and mime, each a u16 byte
 /// length and UTF-8.
 pub fn encode_records(items: &[MediaItem]) -> Vec<u8> {
     let mut b = Vec::with_capacity(8 + items.len() * 110);
@@ -71,6 +73,7 @@ pub fn encode_records(items: &[MediaItem]) -> Vec<u8> {
         b.extend_from_slice(&i.added_ms.to_le_bytes());
         b.push(i.favourite as u8);
         b.extend_from_slice(&i.bucket_id.to_le_bytes());
+        b.extend_from_slice(&i.expires_ms.to_le_bytes());
         for s in [&i.name, &i.folder, &i.mime] {
             let s = &s.as_bytes()[..s.len().min(u16::MAX as usize)];
             b.extend_from_slice(&(s.len() as u16).to_le_bytes());
@@ -120,8 +123,8 @@ pub fn parse_records(bytes: &[u8]) -> Result<Vec<MediaItem>, ParseError> {
         return Err(ParseError::BadHeader);
     }
     let count = r.u32()? as usize;
-    // Never trust the count for the allocation: a record is at least 70 bytes.
-    let mut out = Vec::with_capacity(count.min(bytes.len() / 70));
+    // Never trust the count for the allocation: a record is at least 78 bytes.
+    let mut out = Vec::with_capacity(count.min(bytes.len() / 78));
     for _ in 0..count {
         let id = r.i64()?;
         let kind = match r.u8()? {
@@ -143,6 +146,7 @@ pub fn parse_records(bytes: &[u8]) -> Result<Vec<MediaItem>, ParseError> {
             added_ms: r.i64()?,
             favourite: r.u8()? & 1 != 0,
             bucket_id: r.i64()?,
+            expires_ms: r.i64()?,
             name: r.text()?,
             folder: r.text()?,
             mime: r.text()?,
@@ -172,6 +176,7 @@ mod tests {
             name: name.into(),
             folder: folder.into(),
             mime: "video/mp4".into(),
+            expires_ms: 0,
         }
     }
 
@@ -180,6 +185,8 @@ mod tests {
         let mut gif = item(2, "日本.gif", "");
         gif.kind = Kind::Gif;
         gif.favourite = false;
+        // In the Bin: the day it goes for good.
+        gif.expires_ms = 1_797_000_000_000;
         let items = vec![item(1, "VID_20261126_084210.mp4", "Camera"), gif];
         assert_eq!(parse_records(&encode_records(&items)), Ok(items));
     }
@@ -187,6 +194,13 @@ mod tests {
     #[test]
     fn empty_list_round_trips() {
         assert_eq!(parse_records(&encode_records(&[])), Ok(vec![]));
+    }
+
+    #[test]
+    fn last_versions_list_is_refused() {
+        let mut b = encode_records(&[item(1, "a.mp4", "x")]);
+        b[3] = b'1';
+        assert_eq!(parse_records(&b), Err(ParseError::BadHeader));
     }
 
     #[test]

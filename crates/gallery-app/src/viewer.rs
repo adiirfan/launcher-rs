@@ -1019,12 +1019,7 @@ fn bottom_icon(batch: &mut Batch, b: Button, x: f32, y: f32, size: f32, video: b
     let u = size / 24.0;
     let lw = 1.8 * u;
     match b {
-        Button::Share => {
-            for (cx, cy) in [(18.0, 7.0), (6.0, 12.0), (18.0, 17.0)] {
-                circle_ring(batch, x + cx * u, y + cy * u, 2.0 * u, lw, c);
-            }
-            icon(batch, &[&[(8.0, 11.0), (16.0, 7.6)], &[(8.0, 13.0), (16.0, 16.4)]], x, y, u, lw, c);
-        }
+        Button::Share => widgets::action_icon(batch, "SHARE", x, y, size, c),
         Button::Edit if video => {
             circle_ring(batch, x + 6.0 * u, y + 6.0 * u, 2.0 * u, lw, c);
             circle_ring(batch, x + 6.0 * u, y + 18.0 * u, 2.0 * u, lw, c);
@@ -1035,7 +1030,7 @@ fn bottom_icon(batch: &mut Batch, b: Button, x: f32, y: f32, size: f32, video: b
             circle_ring(batch, x + 12.0 * u, y + 12.0 * u, 9.0 * u, lw, c);
             icon(batch, &[&[(12.0, 11.0), (12.0, 17.0)], &[(12.0, 7.3), (12.0, 8.3)]], x, y, u, lw, c);
         }
-        Button::Delete => icon(batch, &[&[(5.0, 7.0), (19.0, 7.0)], &[(9.0, 7.0), (9.0, 4.0), (15.0, 4.0), (15.0, 7.0)], &[(7.0, 7.0), (8.0, 20.0), (16.0, 20.0), (17.0, 7.0)]], x, y, u, lw, c),
+        Button::Delete => widgets::action_icon(batch, "DELETE", x, y, size, c),
         _ => {}
     }
 }

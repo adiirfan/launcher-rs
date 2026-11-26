@@ -30,8 +30,9 @@ final class Library {
         String[] cols = COLUMNS;
         boolean fav = Build.VERSION.SDK_INT >= 30;
         if (fav) {
-            cols = java.util.Arrays.copyOf(COLUMNS, COLUMNS.length + 1);
+            cols = java.util.Arrays.copyOf(COLUMNS, COLUMNS.length + 2);
             cols[COLUMNS.length] = "is_favorite";
+            cols[COLUMNS.length + 1] = "date_expires";
         }
         Cursor cur;
         if (Build.VERSION.SDK_INT >= 30) {
@@ -49,7 +50,7 @@ final class Library {
         int count = 0;
         if (cur != null) {
             try {
-                ByteBuffer rec = ByteBuffer.allocate(80).order(ByteOrder.LITTLE_ENDIAN);
+                ByteBuffer rec = ByteBuffer.allocate(96).order(ByteOrder.LITTLE_ENDIAN);
                 while (cur.moveToNext()) {
                     String mime = str(cur, 2);
                     int kind = cur.getInt(1) == 3 ? 1 : ("image/gif".equals(mime) ? 2 : 0);
@@ -66,6 +67,7 @@ final class Library {
                     rec.putLong(cur.getLong(10) * 1000L);
                     rec.put((byte) (fav && cur.getInt(14) != 0 ? 1 : 0));
                     rec.putLong(cur.getLong(11));
+                    rec.putLong(trashed && fav ? cur.getLong(15) * 1000L : 0L);
                     out.write(rec.array(), 0, rec.position());
                     text(out, str(cur, 13));
                     text(out, str(cur, 12));
@@ -94,7 +96,7 @@ final class Library {
 
     private static byte[] pack(int count, ByteArrayOutputStream body) {
         ByteBuffer head = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN);
-        head.put((byte) 'H').put((byte) 'G').put((byte) 'L').put((byte) '1').putInt(count);
+        head.put((byte) 'H').put((byte) 'G').put((byte) 'L').put((byte) '2').putInt(count);
         byte[] b = body.toByteArray();
         byte[] all = new byte[8 + b.length];
         System.arraycopy(head.array(), 0, all, 0, 8);

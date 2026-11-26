@@ -90,6 +90,7 @@ mod tests {
             name: format!("{id}.jpg"),
             folder: folder.into(),
             mime: "image/jpeg".into(),
+            expires_ms: 0,
         }
     }
 

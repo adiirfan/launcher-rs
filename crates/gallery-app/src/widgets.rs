@@ -187,3 +187,45 @@ pub fn button(gl: &Context, r: &mut Renderer, batch: &mut Batch, rect: Rect, lab
     let lw = r.measure_spaced(label, em, 0.6 * d, Weight::Medium);
     r.text_spaced(gl, batch, label, rect.x + (rect.w - lw) / 2.0, baseline(r, rect.y + rect.h / 2.0, em, d), em, 0.6 * d, rect.w, Rgba::hex(WHITE), Weight::Medium);
 }
+
+/// The corner checkbox on a tile in selection mode: a dark square with a
+/// light edge, filled with the accent and a tick when chosen.
+pub fn checkbox(batch: &mut Batch, x: f32, y: f32, size: f32, on: bool) {
+    let u = size / 30.0;
+    let b = Rect::new(x + 5.0 * u, y + 7.0 * u, 18.0 * u, 18.0 * u);
+    if on {
+        batch.rect(b, accent(), 0.0);
+        holo::stroke(batch, (b.x + 4.0 * u, b.y + 9.0 * u), (b.x + 8.0 * u, b.y + 13.0 * u), 2.2 * u, Rgba::hex(WHITE));
+        holo::stroke(batch, (b.x + 8.0 * u, b.y + 13.0 * u), (b.x + 15.0 * u, b.y + 5.0 * u), 2.2 * u, Rgba::hex(WHITE));
+    } else {
+        batch.rect(b, Rgba::hex(BLACK).with_alpha(0.55), 0.0);
+        batch.outline(b, Rgba::hex(0xE0E0E0), 0.0, 2.0 * u);
+    }
+}
+
+fn lines(batch: &mut Batch, pts: &[&[(f32, f32)]], x: f32, y: f32, u: f32, c: Rgba) {
+    for p in pts {
+        for w in p.windows(2) {
+            holo::stroke(batch, (x + w[0].0 * u, y + w[0].1 * u), (x + w[1].0 * u, y + w[1].1 * u), 1.8 * u, c);
+        }
+    }
+}
+
+/// The bottom-bar icons shared by the viewer, selection and Bin: SHARE,
+/// DELETE (and DELETE FOREVER), RESTORE. On a 24-unit square.
+pub fn action_icon(batch: &mut Batch, which: &str, x: f32, y: f32, size: f32, c: Rgba) {
+    let u = size / 24.0;
+    match which {
+        "SHARE" => {
+            for (cx, cy) in [(18.0, 7.0), (6.0, 12.0), (18.0, 17.0)] {
+                batch.outline(Rect::new(x + (cx - 2.0) * u, y + (cy - 2.0) * u, 4.0 * u, 4.0 * u), c, 2.0 * u, 1.8 * u);
+            }
+            lines(batch, &[&[(8.0, 11.0), (16.0, 7.6)], &[(8.0, 13.0), (16.0, 16.4)]], x, y, u, c);
+        }
+        "RESTORE" => {
+            // An arrow curling back up: a box with an arrow out of its top.
+            lines(batch, &[&[(5.0, 11.0), (5.0, 20.0), (19.0, 20.0), (19.0, 11.0)], &[(12.0, 16.0), (12.0, 4.0)], &[(8.0, 8.0), (12.0, 4.0), (16.0, 8.0)]], x, y, u, c);
+        }
+        _ => lines(batch, &[&[(5.0, 7.0), (19.0, 7.0)], &[(9.0, 7.0), (9.0, 4.0), (15.0, 4.0), (15.0, 7.0)], &[(7.0, 7.0), (8.0, 20.0), (16.0, 20.0), (17.0, 7.0)]], x, y, u, c),
+    }
+}

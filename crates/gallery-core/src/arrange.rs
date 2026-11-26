@@ -168,6 +168,7 @@ mod tests {
             name: name.into(),
             folder: "Camera".into(),
             mime: "image/jpeg".into(),
+            expires_ms: 0,
         }
     }
 

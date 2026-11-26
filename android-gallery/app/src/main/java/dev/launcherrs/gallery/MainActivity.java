@@ -169,6 +169,25 @@ public class MainActivity extends NativeActivity {
     public void videoMute(boolean muted) { player().setMuted(muted); }
     public void videoClose() { player().close(); }
 
+    /** Rust: share, Bin, favourites. See MediaActions. On Android 11+ the
+     *  answer comes later through onActionDone. */
+    public void share(long[] ids, boolean[] video) { MediaActions.share(this, ids, video); }
+    public void mediaRequest(int kind, long[] ids, boolean[] video, boolean on) {
+        MediaActions.request(this, kind, ids, video, on);
+    }
+    public String trashLegacy(long[] ids, boolean[] video) { return MediaActions.trashLegacy(this, ids, video); }
+    public boolean restoreLegacy(String stored, String original) { return MediaActions.restoreLegacy(this, stored, original); }
+    public String binDir() { return MediaActions.binDir(this).getAbsolutePath(); }
+    public byte[] loadThumbPath(String path, boolean video, int size) { return Thumbs.load(this, 0, path, video, 0, size); }
+    public boolean canManageMedia() { return MediaActions.canManageMedia(this); }
+    public int sdk() { return Build.VERSION.SDK_INT; }
+
+    @Override protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if (request > 100 && request <= 104) onActionDone(request - 100, result == RESULT_OK);
+    }
+
+    static native void onActionDone(int kind, boolean ok);
     static native void onVideoFrame();
     static native void onVideoState(int state, int w, int h);
     static native void onInsets(int top, int bottom, int left, int right);
