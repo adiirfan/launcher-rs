@@ -148,11 +148,20 @@ fn android_main(app: AndroidApp) {
                     }
                     MainEvent::Resume { .. } => {
                         visible = true;
+                        drawer.shown_again();
                         needs_refresh = true;
                         drawer.recheck_permission();
                         sched.request_redraw();
                     }
                     MainEvent::Pause => visible = false,
+                    MainEvent::Stop => {
+                        // Whatever app opened now covers us: put Home back
+                        // behind it, ready for when the user returns.
+                        if drawer.hidden(Instant::now()) {
+                            keyboard::clear_text(&app);
+                            sched.request_redraw();
+                        }
+                    }
                     MainEvent::WindowResized { .. }
                     | MainEvent::RedrawNeeded { .. }
                     | MainEvent::ContentRectChanged { .. }
@@ -649,9 +658,8 @@ fn drawer_action(app: &AndroidApp, drawer: &mut Drawer, action: DrawerAction, no
             let ok = apps::launch(app, &key);
             log::info!("launch {} -> {ok}", key.package);
             if ok {
-                drawer.close(now, false);
+                drawer.launched();
                 keyboard::show(app, false);
-                keyboard::clear_text(app);
             }
         }
         DrawerAction::Close => {
