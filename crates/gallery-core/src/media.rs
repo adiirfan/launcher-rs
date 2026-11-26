@@ -1,14 +1,15 @@
 //! One photo or video, as Android's media list describes it, and the byte
 //! format Java hands it over in (also used for the start-up snapshot).
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Kind {
+    #[default]
     Image,
     Video,
     Gif,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct MediaItem {
     pub id: i64,
     pub kind: Kind,

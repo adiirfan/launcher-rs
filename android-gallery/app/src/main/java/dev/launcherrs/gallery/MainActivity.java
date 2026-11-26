@@ -41,6 +41,47 @@ public class MainActivity extends NativeActivity {
             return v.onApplyWindowInsets(insets);
         });
         reportAccess();
+        // A rebuilt activity has already shown this one.
+        if (savedInstanceState == null) deliver(getIntent());
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        deliver(intent);
+    }
+
+    /** "Open with" from another app: hand the link to Rust. */
+    private void deliver(Intent i) {
+        if (i == null || i.getData() == null) return;
+        String a = i.getAction();
+        if (!Intent.ACTION_VIEW.equals(a) && !"android.provider.action.REVIEW".equals(a)
+                && !"android.provider.action.REVIEW_SECURE".equals(a)) return;
+        Uri u = i.getData();
+        String mime = i.getType();
+        if (mime == null) {
+            try { mime = getContentResolver().getType(u); } catch (Exception e) { mime = null; }
+        }
+        if (mime == null) {
+            String ext = android.webkit.MimeTypeMap.getFileExtensionFromUrl(u.toString());
+            mime = ext == null ? null : android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext.toLowerCase());
+        }
+        // Its name, size and date, where the other app says.
+        String name = u.getLastPathSegment();
+        long size = 0, modified = 0;
+        try (android.database.Cursor c = getContentResolver().query(u, null, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                int n = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
+                int s = c.getColumnIndex(android.provider.OpenableColumns.SIZE);
+                int m = c.getColumnIndex("last_modified");
+                if (n >= 0 && !c.isNull(n)) name = c.getString(n);
+                if (s >= 0 && !c.isNull(s)) size = c.getLong(s);
+                if (m >= 0 && !c.isNull(m)) modified = c.getLong(m);
+            }
+        } catch (Exception e) { /* a plain file link: no answers */ }
+        if (name != null && name.contains("/")) name = name.substring(name.lastIndexOf('/') + 1);
+        Thumbs.foreign = u;
+        onOpen(u.toString(), mime == null ? "" : mime, name == null ? "" : name, size, modified);
     }
 
     @Override protected void onStart() {
@@ -188,6 +229,7 @@ public class MainActivity extends NativeActivity {
     }
 
     static native void onActionDone(int kind, boolean ok);
+    static native void onOpen(String uri, String mime, String name, long size, long modifiedMs);
     static native void onVideoFrame();
     static native void onVideoState(int state, int w, int h);
     static native void onInsets(int top, int bottom, int left, int right);

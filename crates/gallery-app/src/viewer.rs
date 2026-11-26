@@ -138,6 +138,9 @@ struct Video {
 
 pub struct Viewer {
     d: f32,
+    /// A picture another app handed us, outside the library: nothing to
+    /// favourite or delete, so only SHARE and INFO.
+    outside: bool,
     items: Arc<Vec<MediaItem>>,
     /// Indexes into `items`, in the order the grid showed them.
     order: Vec<u32>,
@@ -175,6 +178,7 @@ impl Viewer {
         pager.jump_to(index);
         Viewer {
             d,
+            outside: false,
             items,
             order,
             pager,
@@ -214,6 +218,10 @@ impl Viewer {
 
     /// The library or the grid's order changed: stay on the same picture,
     /// or the next one if it's gone. Returns false when nothing is left.
+    pub fn set_outside(&mut self) {
+        self.outside = true;
+    }
+
     pub fn set_list(&mut self, items: Arc<Vec<MediaItem>>, order: Vec<u32>) -> bool {
         let old = self.ids();
         let current = self.item(self.pager.page()).map(|i| i.id).unwrap_or(-1);
@@ -573,13 +581,18 @@ impl Viewer {
         f.h - f.ins.bottom - BOTTOM_DP * self.d
     }
 
-    fn button_rects(&self, f: &Frame) -> [(Button, Rect); 7] {
+    fn button_rects(&self, f: &Frame) -> Vec<(Button, Rect)> {
         let d = self.d;
         let top = f.ins.top;
         let by = self.bottom_y(f);
+        if self.outside {
+            let q = (f.w - f.ins.left - f.ins.right) / 2.0;
+            let bx = |i: f32| Rect::new(f.ins.left + q * i, by, q, BOTTOM_DP * d);
+            return vec![(Button::Back, Rect::new(0.0, top, 52.0 * d, BAR_DP * d)), (Button::Share, bx(0.0)), (Button::Info, bx(1.0))];
+        }
         let q = (f.w - f.ins.left - f.ins.right) / 4.0;
         let bx = |i: f32| Rect::new(f.ins.left + q * i, by, q, BOTTOM_DP * d);
-        [
+        vec![
             (Button::Back, Rect::new(0.0, top, 52.0 * d, BAR_DP * d)),
             (Button::Star, Rect::new(f.w - 96.0 * d, top, 48.0 * d, BAR_DP * d)),
             (Button::More, Rect::new(f.w - 48.0 * d, top, 48.0 * d, BAR_DP * d)),
@@ -598,14 +611,14 @@ impl Viewer {
         let white = Rgba::hex(WHITE);
         let pressed = |b: Button| self.press == Some(b);
         let rects = self.button_rects(f);
-        let rect_of = |b: Button| rects.iter().find(|x| x.0 == b).unwrap().1;
+        let rect_of = |b: Button| rects.iter().find(|x| x.0 == b).map(|x| x.1);
 
         // Top: back, when and file name, star, more.
         let top_h = self.top_h(f);
         batch.rect(Rect::new(0.0, 0.0, f.w, top_h), shade, 0.0);
         for b in [Button::Back, Button::Star, Button::More] {
-            if pressed(b) {
-                batch.rect(rect_of(b), accent.with_alpha(0.3), 0.0);
+            if let Some(rc) = rect_of(b).filter(|_| pressed(b)) {
+                batch.rect(rc, accent.with_alpha(0.3), 0.0);
             }
         }
         let cy = f.ins.top + BAR_DP * d / 2.0;
@@ -613,19 +626,27 @@ impl Viewer {
         icon(batch, &[&[(23.0, cy / u - 7.0), (17.0, cy / u), (23.0, cy / u + 7.0)]], 0.0, 0.0, u, 2.0 * d, white);
         let tx = 52.0 * d;
         let tw = f.w - tx - 100.0 * d;
-        let when = dates::short_when(it.when_taken(), f.utc_offset_s, f.today);
-        r.text(gl, batch, &when, tx, cy - 2.0 * d, 17.0 * d, tw, white, Weight::Regular);
-        r.text(gl, batch, &it.name, tx, cy + 17.0 * d, 13.0 * d, tw, Rgba::hex(FILE_GREY), Weight::Regular);
-        let star = rect_of(Button::Star);
-        star_icon(batch, star.x + star.w / 2.0 - 11.0 * d, cy - 11.0 * d, 22.0 * d, it.favourite);
-        widgets::overflow(batch, f.w - 24.0 * d, cy, d);
+        if it.when_taken() > 0 {
+            let when = dates::short_when(it.when_taken(), f.utc_offset_s, f.today);
+            r.text(gl, batch, &when, tx, cy - 2.0 * d, 17.0 * d, tw, white, Weight::Regular);
+            r.text(gl, batch, &it.name, tx, cy + 17.0 * d, 13.0 * d, tw, Rgba::hex(FILE_GREY), Weight::Regular);
+        } else {
+            // No date known (a file from another app): just its name.
+            r.text(gl, batch, &it.name, tx, widgets::baseline(r, cy, 17.0 * d, d), 17.0 * d, tw, white, Weight::Regular);
+        }
+        if let Some(star) = rect_of(Button::Star) {
+            star_icon(batch, star.x + star.w / 2.0 - 11.0 * d, cy - 11.0 * d, 22.0 * d, it.favourite);
+        }
+        if rect_of(Button::More).is_some() {
+            widgets::overflow(batch, f.w - 24.0 * d, cy, d);
+        }
 
         // Bottom: SHARE, EDIT, INFO, DELETE.
         let by = self.bottom_y(f);
         batch.rect(Rect::new(0.0, by, f.w, f.h - by), shade, 0.0);
         batch.rect(Rect::new(0.0, by, f.w, 1.0 * d), Rgba::hex(LINE), 0.0);
         for (b, label) in [(Button::Share, "SHARE"), (Button::Edit, "EDIT"), (Button::Info, "INFO"), (Button::Delete, "DELETE")] {
-            let rc = rect_of(b);
+            let Some(rc) = rect_of(b) else { continue };
             if pressed(b) {
                 batch.rect(rc, accent.with_alpha(0.3), 0.0);
             }
@@ -711,7 +732,7 @@ impl Viewer {
         }
     }
 
-    fn is_video(&self) -> bool {
+    pub fn is_video(&self) -> bool {
         self.item(self.pager.page()).is_some_and(|i| i.kind == Kind::Video)
     }
 
@@ -722,6 +743,9 @@ impl Viewer {
             size.push_str(&format!(" · {}", format::duration(it.duration_ms)));
         }
         let mut rows = vec![("Taken", dates::full_when(it.when_taken(), f.utc_offset_s)), ("File", it.name.clone()), ("Size", size)];
+        if it.when_taken() <= 0 {
+            rows.remove(0);
+        }
         if let Some((id, fields)) = &self.details
             && *id == it.id
         {
@@ -733,7 +757,9 @@ impl Viewer {
                 rows.push(("Location", fields[4].replace(',', ", ")));
             }
         }
-        rows.push(("Folder", it.folder.clone()));
+        if !it.folder.is_empty() {
+            rows.push(("Folder", it.folder.clone()));
+        }
         rows
     }
 

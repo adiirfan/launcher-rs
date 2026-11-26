@@ -13,6 +13,7 @@ mod viewer_jobs;
 mod chrome;
 mod input;
 mod library;
+mod open_with;
 mod photos;
 mod system;
 mod thumbs;
@@ -77,6 +78,12 @@ fn android_main(app: AndroidApp) {
     let mut photo_draw: Option<photo_tex::PhotoDraw> = None;
     let mut screen_w = 1080.0f32;
     let mut asked_access = false;
+    // "Open with" from another app: the link waits until the library is in.
+    let mut want_open: Option<(open_with::Handed, Instant)> = None;
+    let mut library_seen = false;
+    // Opened from another app: Back returns there.
+    let mut outside = false;
+    let mut viewer_source = ViewerSource::Grid;
 
     let mut sched = FrameScheduler::new();
     let mut gfx: Option<GlSurface> = None;
@@ -134,6 +141,12 @@ fn android_main(app: AndroidApp) {
             }
         });
 
+        if let Some(h) = open_with::take() {
+            want_open = Some((h, Instant::now()));
+        }
+        if want_open.is_some() {
+            sched.request_redraw();
+        }
         let input = input::drain(&app);
         if !input.touches.is_empty() {
             policy.note_activity(Instant::now());
@@ -145,9 +158,16 @@ fn android_main(app: AndroidApp) {
                 let item = |id: i64| photos.items().iter().find(|i| i.id == id).cloned();
                 match act {
                     viewer::Action::None => {}
-                    viewer::Action::Back => closed.extend(viewer.take()),
+                    viewer::Action::Back => {
+                        closed.extend(viewer.take());
+                        if std::mem::take(&mut outside) {
+                            open_with::leave(&app);
+                        }
+                    }
                     viewer::Action::Share(id) => {
-                        if let Some(it) = item(id) {
+                        if id == open_with::FOREIGN_ID {
+                            actions::share(&app, &[(id, v.is_video())]);
+                        } else if let Some(it) = item(id) {
                             actions::share(&app, &[(id, it.kind == gallery_core::media::Kind::Video)]);
                         }
                     }
@@ -210,6 +230,7 @@ fn android_main(app: AndroidApp) {
                 Action::Open(i) => {
                     let grid = album.as_ref().unwrap_or(&photos);
                     viewer = Some(Viewer::open(&app, photos_density(&app), grid.items().clone(), grid.arranged().order.clone(), i as usize, screen_w));
+                    viewer_source = ViewerSource::Grid;
                 }
                 Action::Albums => on_albums = true,
                 Action::Bin => bin = Some(open_bin(&app, system_bin, photos_density(&app))),
@@ -245,6 +266,9 @@ fn android_main(app: AndroidApp) {
             if let Some(v) = viewer.as_mut() {
                 if !v.back() {
                     closed.extend(viewer.take());
+                    if std::mem::take(&mut outside) {
+                        open_with::leave(&app);
+                    }
                 }
             } else if let Some(b) = bin.as_mut() {
                 if !b.back() {
@@ -289,7 +313,8 @@ fn android_main(app: AndroidApp) {
                 a.set_items(fresh.clone());
             }
             photos.set_items(fresh);
-            viewer_list_stale = viewer.is_some();
+            viewer_list_stale = viewer.is_some() && viewer_source != ViewerSource::Foreign;
+            library_seen = true;
             thumbs.clear_failures();
             sched.request_redraw();
         }
@@ -355,8 +380,37 @@ fn android_main(app: AndroidApp) {
                 let (today, utc_offset_s) = system::local_today();
                 let frame = photos::Frame { w, h, ins, today, utc_offset_s };
                 let access = library::access();
+                if let Some((h, since)) = want_open.take() {
+                    let in_library = gallery_core::open_with::media_id(&h.uri).map(|(id, _)| id);
+                    if in_library.is_some() && !library_seen && since.elapsed() < Duration::from_secs(2) {
+                        want_open = Some((h, since));
+                    } else {
+                        closed.extend(viewer.take());
+                        bin = None;
+                        photos.refresh(&frame);
+                        let order = &photos.arranged().order;
+                        let at = in_library.and_then(|id| order.iter().position(|&i| photos.items().get(i as usize).is_some_and(|it| it.id == id)));
+                        let pd = photos_density(&app);
+                        viewer = Some(match at {
+                            Some(at) => {
+                                viewer_source = ViewerSource::All;
+                                Viewer::open(&app, pd, photos.items().clone(), order.clone(), at, w)
+                            }
+                            None => {
+                                viewer_source = ViewerSource::Foreign;
+                                let mut v = Viewer::open(&app, pd, std::sync::Arc::new(vec![open_with::foreign_item(&h)]), vec![0], 0, w);
+                                v.set_outside();
+                                v
+                            }
+                        });
+                        outside = true;
+                    }
+                }
                 if std::mem::take(&mut viewer_list_stale) && let Some(v) = viewer.as_mut() {
-                    let grid = album.as_mut().unwrap_or(&mut photos);
+                    let grid = match viewer_source {
+                        ViewerSource::Grid => album.as_mut().unwrap_or(&mut photos),
+                        _ => &mut photos,
+                    };
                     grid.refresh(&frame);
                     if !v.set_list(grid.items().clone(), grid.arranged().order.clone()) {
                         closed.extend(viewer.take());
@@ -422,6 +476,17 @@ fn android_main(app: AndroidApp) {
         }
     }
     log::info!("android_main end");
+}
+
+/// Where the open viewer's list came from.
+#[derive(Clone, Copy, PartialEq)]
+enum ViewerSource {
+    /// The grid on screen (all photos or an album).
+    Grid,
+    /// All photos, opened from another app.
+    All,
+    /// One picture from another app, outside the library.
+    Foreign,
 }
 
 fn photos_density(app: &AndroidApp) -> f32 {

@@ -18,7 +18,13 @@ import java.nio.ByteBuffer;
 final class Thumbs {
     private Thumbs() {}
 
+    /** The id Rust uses for a picture another app handed us. */
+    static final long FOREIGN = Long.MIN_VALUE;
+    /** That picture's link (set by MainActivity before telling Rust). */
+    static volatile Uri foreign;
+
     static Uri uri(long id, boolean video) {
+        if (id == FOREIGN && foreign != null) return foreign;
         return ContentUris.withAppendedId(video ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI
                 : MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id);
     }
