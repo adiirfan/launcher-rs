@@ -243,16 +243,27 @@ fn bitmap_bytes(env: &mut Env, bitmap: &JObject, size: i32) -> jni::errors::Resu
     env.convert_byte_array(&array)
 }
 
-pub fn launch(app: &AndroidApp, entry: &AppKey) -> bool {
+/// Start the app. `icon` (x, y, w, h on screen) is passed on as where the
+/// launch came from; apps may read it. (Asking Android to grow the app out
+/// of the icon is ignored for home apps that aren't built into the phone.)
+pub fn launch(app: &AndroidApp, entry: &AppKey, icon: Option<(f32, f32, f32, f32)>) -> bool {
     let result = with_activity(app, |env, activity| {
         let la = launcher_apps(env, activity)?;
         let user = my_user(env)?;
         let comp = component(env, entry)?;
+        let bounds = match icon {
+            Some((x, y, w, h)) => env.new_object(
+                jni_str!("android/graphics/Rect"),
+                jni_sig!("(IIII)V"),
+                &[JValue::Int(x as i32), JValue::Int(y as i32), JValue::Int((x + w) as i32), JValue::Int((y + h) as i32)],
+            )?,
+            None => JObject::null(),
+        };
         env.call_method(
             &la,
             jni_str!("startMainActivity"),
             jni_sig!("(Landroid/content/ComponentName;Landroid/os/UserHandle;Landroid/graphics/Rect;Landroid/os/Bundle;)V"),
-            &[JValue::Object(&comp), JValue::Object(&user), JValue::Object(&JObject::null()), JValue::Object(&JObject::null())],
+            &[JValue::Object(&comp), JValue::Object(&user), JValue::Object(&bounds), JValue::Object(&JObject::null())],
         )?;
         Ok(())
     });

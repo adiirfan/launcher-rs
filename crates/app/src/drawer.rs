@@ -32,7 +32,8 @@ const MAX_CONTACTS: usize = 5;
 #[derive(Clone, Debug, PartialEq)]
 pub enum DrawerAction {
     None,
-    Launch(AppKey),
+    /// The app, and where its icon is on screen (for the opening zoom).
+    Launch(AppKey, Option<(f32, f32, f32, f32)>),
     Close,
     ShowKeyboard,
     ClearText,
@@ -301,7 +302,7 @@ impl Drawer {
             return DrawerAction::None;
         }
         if let Some(&i) = self.results.first() {
-            return DrawerAction::Launch(apps[i].key.clone());
+            return DrawerAction::Launch(apps[i].key.clone(), None);
         }
         self.settings.first().map_or(DrawerAction::None, |p| DrawerAction::OpenSettings(p.action))
     }
@@ -438,7 +439,7 @@ impl Drawer {
                 match gesture {
                     ListGesture::PullDown { dy } if dy > PULL_CLOSE_DP * self.density => DrawerAction::Close,
                     ListGesture::Tap { x, y } if pressed.is_some() && pressed == self.target_at(x, y, t.t) => {
-                        self.tap(pressed.unwrap(), apps)
+                        self.tap(pressed.unwrap(), apps, t.t)
                     }
                     _ => DrawerAction::None,
                 }
@@ -465,7 +466,7 @@ impl Drawer {
         self.press.next_wake(now)
     }
 
-    fn tap(&mut self, target: Target, apps: &[AppRecord]) -> DrawerAction {
+    fn tap(&mut self, target: Target, apps: &[AppRecord], now: Instant) -> DrawerAction {
         match target {
             Target::Field => {
                 self.focused = true;
@@ -476,7 +477,10 @@ impl Drawer {
                 DrawerAction::ClearText
             }
             Target::HomeBar => DrawerAction::Close,
-            Target::App(i) => self.results.get(i).map_or(DrawerAction::None, |&a| DrawerAction::Launch(apps[a].key.clone())),
+            Target::App(i) => {
+                let at = self.metrics.map(|(m, ..)| m.icon_rect(i, self.scroller.offset(now)));
+                self.results.get(i).map_or(DrawerAction::None, |&a| DrawerAction::Launch(apps[a].key.clone(), at))
+            }
             Target::Row(Row::Settings(i)) => self.settings.get(i).map_or(DrawerAction::None, |p| DrawerAction::OpenSettings(p.action)),
             Target::Row(Row::Contact(i)) => self.contacts.get(i).map_or(DrawerAction::None, |c| DrawerAction::OpenContact(c.clone())),
             Target::Row(Row::ContactsPrompt) => match self.permission {

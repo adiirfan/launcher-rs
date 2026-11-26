@@ -15,6 +15,9 @@ pub struct GlSurface {
     config: egl::Config,
     context: egl::Context,
     surface: Option<egl::Surface>,
+    /// The window size the surface was built for. The surface follows the
+    /// window on its own, but keeps buffers of its first size around.
+    built_for: (i32, i32),
     gl: glow::Context,
 }
 
@@ -47,7 +50,8 @@ impl GlSurface {
         // glow reads GL_VERSION while loading, so a context must be current first.
         let surface = make_surface(&egl, display, config, context, window)?;
         let gl = unsafe { glow::Context::from_loader_function(|name| load_gl(&egl, name)) };
-        let me = GlSurface { egl, display, config, context, surface: Some(surface), gl };
+        let built_for = (window.width(), window.height());
+        let me = GlSurface { egl, display, config, context, surface: Some(surface), built_for, gl };
         me.log_size();
         Ok(me)
     }
@@ -56,6 +60,7 @@ impl GlSurface {
     pub fn resume(&mut self, window: &NativeWindow) -> Result<(), String> {
         self.suspend();
         self.surface = Some(make_surface(&self.egl, self.display, self.config, self.context, window)?);
+        self.built_for = (window.width(), window.height());
         self.log_size();
         Ok(())
     }
@@ -72,6 +77,11 @@ impl GlSurface {
             let _ = self.egl.destroy_surface(self.display, surface);
             log::info!("GlSurface: surface dropped");
         }
+    }
+
+    /// The window is no longer the size this surface was built for.
+    pub fn outgrown(&self, window: &NativeWindow) -> bool {
+        self.surface.is_some() && (window.width(), window.height()) != self.built_for
     }
 
     pub fn has_surface(&self) -> bool {
