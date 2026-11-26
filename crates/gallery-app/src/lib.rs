@@ -1,6 +1,7 @@
 //! Holo Gallery's Android entry point. Everything here is Android-only.
 #![cfg(target_os = "android")]
 
+mod albums_screen;
 mod bars;
 mod chrome;
 mod input;
@@ -26,6 +27,7 @@ use launcher_core::frame::FrameScheduler;
 use launcher_core::refresh::{RateVote, RefreshPolicy};
 use launcher_draw::batch::Batch;
 use launcher_draw::{Rect, Rgba};
+use albums_screen::AlbumsScreen;
 use photos::{Action, Photos};
 use thumbs::Thumbs;
 
@@ -48,6 +50,10 @@ fn android_main(app: AndroidApp) {
     let thumbs = Thumbs::new(&app);
     let d0 = app.config().density().unwrap_or(160) as f32 / 160.0;
     let mut photos = Photos::new(d0, Filter::All, None);
+    let mut albums = AlbumsScreen::new(d0);
+    // An open album: the same grid with a filter and a back arrow.
+    let mut album: Option<Photos> = None;
+    let mut on_albums = false;
     let mut asked_access = false;
 
     let mut sched = FrameScheduler::new();
@@ -112,8 +118,32 @@ fn android_main(app: AndroidApp) {
             sched.request_redraw();
         }
         for t in input.touches {
-            match photos.touch(t, library::access()) {
+            let action = match (album.as_mut(), on_albums) {
+                (Some(a), _) => a.touch(t, library::access()),
+                (None, true) => {
+                    match albums.touch(t) {
+                        albums_screen::Action::None => {}
+                        albums_screen::Action::Photos => on_albums = false,
+                        albums_screen::Action::Open(a) => {
+                            let mut grid = Photos::new(photos_density(&app), a.filter, Some(a.name));
+                            grid.set_items(photos.items().clone());
+                            grid.set_sort(photos.sort, photos.order);
+                            album = Some(grid);
+                        }
+                        other => log::info!("not built yet: {other:?}"),
+                    }
+                    Action::None
+                }
+                (None, false) => photos.touch(t, library::access()),
+            };
+            match action {
                 Action::None => {}
+                Action::Albums => on_albums = true,
+                Action::Back => {
+                    if let Some(a) = album.take() {
+                        photos.set_sort(a.sort, a.order);
+                    }
+                }
                 Action::AskAccess => {
                     if library::can_ask(&app) {
                         library::request_access(&app);
@@ -124,11 +154,25 @@ fn android_main(app: AndroidApp) {
                 other => log::info!("not built yet: {other:?}"),
             }
         }
-        if input.back && !photos.back() {
-            system::finish(&app);
+        if input.back {
+            sched.request_redraw();
+            if let Some(a) = album.as_mut() {
+                if !a.back() {
+                    let a = album.take().unwrap();
+                    photos.set_sort(a.sort, a.order);
+                }
+            } else if on_albums {
+                on_albums = false;
+            } else if !photos.back() {
+                system::finish(&app);
+            }
         }
         if let Some(fresh) = library::take_update() {
             log::info!("showing {} items", fresh.len());
+            albums.set_items(fresh.clone());
+            if let Some(a) = album.as_mut() {
+                a.set_items(fresh.clone());
+            }
             photos.set_items(fresh);
             thumbs.clear_failures();
             sched.request_redraw();
@@ -185,9 +229,18 @@ fn android_main(app: AndroidApp) {
                 }
                 batch.rect(Rect::new(0.0, 0.0, w, h), Rgba::hex(BLACK), 0.0);
                 photos.set_density(d);
+                albums.set_density(d);
                 let (today, utc_offset_s) = system::local_today();
                 let frame = photos::Frame { w, h, ins, today, utc_offset_s };
-                let (anim, missing) = photos.draw(g.gl(), r, &mut batch, &thumbs, frame, library::access(), now);
+                let access = library::access();
+                let (anim, missing) = match (album.as_mut(), on_albums) {
+                    (Some(a), _) => {
+                        a.set_density(d);
+                        a.draw(g.gl(), r, &mut batch, &thumbs, frame, access, now)
+                    }
+                    (None, true) => albums.draw(g.gl(), r, &mut batch, &thumbs, frame, now),
+                    (None, false) => photos.draw(g.gl(), r, &mut batch, &thumbs, frame, access, now),
+                };
                 thumbs.request(&missing);
                 moving = anim;
                 r.draw(g.gl(), &batch, screen);
@@ -235,4 +288,8 @@ fn android_main(app: AndroidApp) {
         }
     }
     log::info!("android_main end");
+}
+
+fn photos_density(app: &AndroidApp) -> f32 {
+    app.config().density().unwrap_or(160) as f32 / 160.0
 }
