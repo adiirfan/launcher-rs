@@ -243,6 +243,16 @@ public class MainActivity extends NativeActivity {
     public String binDir() { return MediaActions.binDir(this).getAbsolutePath(); }
     public byte[] loadThumbPath(String path, boolean video, int size) { return Thumbs.load(this, 0, path, video, 0, size); }
     public boolean canManageMedia() { return MediaActions.canManageMedia(this); }
+
+    // Saving copies (Saver.java); called from Rust worker threads.
+    public String saverRelPath(long id, boolean video) { return Saver.relPath(this, id, video); }
+    public boolean saverExists(String rel, String name) { return Saver.exists(this, rel, name); }
+    public String saverBegin(String rel, String name, String mime, long takenMs, boolean video) {
+        return Saver.begin(this, rel, name, mime, takenMs, video);
+    }
+    public int saverOpenFd(String uri, String mode) { return Saver.openFd(this, uri, mode); }
+    public boolean saverFinish(String uri, long takenMs) { return Saver.finish(this, uri, takenMs); }
+    public void saverAbandon(String uri) { Saver.abandon(this, uri); }
     public int sdk() { return Build.VERSION.SDK_INT; }
 
     @Override protected void onActivityResult(int request, int result, Intent data) {

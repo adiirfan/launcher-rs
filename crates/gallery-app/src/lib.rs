@@ -15,6 +15,7 @@ mod input;
 mod library;
 mod open_with;
 mod photos;
+mod saving;
 mod settings_screen;
 mod system;
 mod thumbs;
