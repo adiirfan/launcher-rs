@@ -3,6 +3,7 @@
 //! at full detail, so big photos don't run the phone out of memory.
 
 use android_activity::AndroidApp;
+use gallery_core::convert::{Format, SizeChoice};
 use gallery_core::crop::{exif_orientation, Crop};
 use gallery_core::media::MediaItem;
 use holo_platform::jni_util::with_activity;
@@ -15,6 +16,28 @@ use crate::saving;
 const JPEG: i32 = 0;
 const PNG: i32 = 1;
 const WEBP: i32 = 2;
+const HEIC: i32 = 3;
+
+/// How a copy is written: SAVE COPY keeps the original's format; SAVE AS…
+/// (Convert) picks these.
+#[derive(Clone, Copy, Debug)]
+pub struct Output {
+    pub format: Format,
+    pub quality: u8,
+    pub size: SizeChoice,
+    pub keep_details: bool,
+    pub no_location: bool,
+}
+
+/// The number Java's `Editing.write` takes for a format.
+pub fn java_format(f: Format) -> i32 {
+    match f {
+        Format::Png => PNG,
+        Format::Webp => WEBP,
+        Format::Heic => HEIC,
+        _ => JPEG,
+    }
+}
 
 /// Biggest picture we'll make: 100 megapixels.
 const MAX_PIXELS: u64 = 100_000_000;
@@ -49,9 +72,20 @@ fn recycle(env: &mut Env, b: &JObject) {
 
 /// Save the copy. `full` is the picture's upright size. Ok(new file name).
 pub fn save(app: &AndroidApp, item: &MediaItem, crop: Crop, full: (u32, u32)) -> Result<String, String> {
-    let (format, ext, mime) = format_for(&item.mime);
+    save_as(app, item, crop, full, None)
+}
+
+/// Save with `out`'s format and size (SAVE AS…), or as the original's
+/// format at full size when `out` is None.
+pub fn save_as(app: &AndroidApp, item: &MediaItem, crop: Crop, full: (u32, u32), out: Option<Output>) -> Result<String, String> {
+    let (format, ext, mime) = match out {
+        Some(o) => (java_format(o.format), o.format.ext(), o.format.mime()),
+        None => format_for(&item.mime),
+    };
+    let suffix = if out.is_some() { "_conv" } else { "_crop" };
+    let (quality, keep, no_loc) = out.map_or((95, true, false), |o| (o.quality as i32, o.keep_details, o.no_location));
     let taken = item.when_taken();
-    if crop.is_rotate_only() && format == JPEG {
+    if out.is_none() && crop.is_rotate_only() && format == JPEG {
         if crop.turns == 0 && !crop.flip {
             return Err("Nothing to save yet".into());
         }
@@ -64,12 +98,15 @@ pub fn save(app: &AndroidApp, item: &MediaItem, crop: Crop, full: (u32, u32)) ->
     }
 
     let (w, h) = full;
-    let (ow, oh) = crop.output_size(w, h);
+    let (cw, ch) = crop.output_size(w, h);
+    let (ow, oh) = out.map_or((cw, ch), |o| o.size.apply(cw, ch));
+    // Output pixel → crop pixel.
+    let (kx, ky) = (cw as f32 / ow as f32, ch as f32 / oh as f32);
     if ow as u64 * oh as u64 > MAX_PIXELS {
         return Err("Too big to save on this phone".into());
     }
     // The part of the upright picture the crop shows.
-    let corners = [(0.0, 0.0), (ow as f32, 0.0), (0.0, oh as f32), (ow as f32, oh as f32)].map(|(x, y)| crop.source_point(x, y, w, h));
+    let corners = [(0.0, 0.0), (cw as f32, 0.0), (0.0, ch as f32), (cw as f32, ch as f32)].map(|(x, y)| crop.source_point(x, y, w, h));
     let fold = |f: fn(f32, f32) -> f32, i: usize, start: f32| corners.iter().map(|c| if i == 0 { c.0 } else { c.1 }).fold(start, f);
     let (ux0, uy0) = ((fold(f32::min, 0, f32::MAX) - 2.0).max(0.0), (fold(f32::min, 1, f32::MAX) - 2.0).max(0.0));
     let (ux1, uy1) = ((fold(f32::max, 0, f32::MIN) + 2.0).min(w as f32), (fold(f32::max, 1, f32::MIN) + 2.0).min(h as f32));
@@ -96,13 +133,13 @@ pub fn save(app: &AndroidApp, item: &MediaItem, crop: Crop, full: (u32, u32)) ->
         if src.is_null() {
             return Ok(Err("Couldn't read the picture".into()));
         }
-        let out = env.call_method(a, jni_str!("editBlank"), jni_sig!("(II)Landroid/graphics/Bitmap;"), &[JValue::Int(ow as i32), JValue::Int(oh as i32)])?.l()?;
-        if out.is_null() {
+        let dst = env.call_method(a, jni_str!("editBlank"), jni_sig!("(II)Landroid/graphics/Bitmap;"), &[JValue::Int(ow as i32), JValue::Int(oh as i32)])?.l()?;
+        if dst.is_null() {
             recycle(env, &src);
             return Ok(Err("Not enough memory for a picture this big".into()));
         }
         {
-            let (Some(s), Some(o)) = (Locked::new(env, &src), Locked::new(env, &out)) else {
+            let (Some(s), Some(o)) = (Locked::new(env, &src), Locked::new(env, &dst)) else {
                 return Ok(Err("Couldn't read the picture".into()));
             };
             let raw_now = if orientation == 90 || orientation == 270 { (h as f32, w as f32) } else { (w as f32, h as f32) };
@@ -112,23 +149,23 @@ pub fn save(app: &AndroidApp, item: &MediaItem, crop: Crop, full: (u32, u32)) ->
             };
             let p0 = at(0.0, 0.0);
             let (px, py) = (at(1.0, 0.0), at(0.0, 1.0));
-            let map = Affine { origin: p0, dx: (px.0 - p0.0, px.1 - p0.1), dy: (py.0 - p0.0, py.1 - p0.1) };
+            let map = Affine { origin: p0, dx: ((px.0 - p0.0) * kx, (px.1 - p0.1) * kx), dy: ((py.0 - p0.0) * ky, (py.1 - p0.1) * ky) };
             let t0 = std::time::Instant::now();
             resample(&s, &o, map);
             log::info!("crop: {}x{} from {}x{} in {:.0} ms", o.w, o.h, s.w, s.h, t0.elapsed().as_secs_f64() * 1e3);
         }
         recycle(env, &src);
-        let Some(copy) = saving::begin(app, item.id, &item.name, false, "_crop", ext, mime, taken, false) else {
-            recycle(env, &out);
+        let Some(copy) = saving::begin(app, item.id, &item.name, false, suffix, ext, mime, taken, false) else {
+            recycle(env, &dst);
             return Ok(Err("Couldn't make the new file".into()));
         };
         let Some(fd) = copy.open_fd("rw") else {
-            recycle(env, &out);
+            recycle(env, &dst);
             return Ok(Err("Couldn't write the new file".into()));
         };
-        let wargs = [JValue::Long(item.id), JValue::Object(&out), JValue::Int(format), JValue::Int(95), JValue::Int(fd), JValue::Bool(true), JValue::Bool(false)];
+        let wargs = [JValue::Long(item.id), JValue::Object(&dst), JValue::Int(format), JValue::Int(quality), JValue::Int(fd), JValue::Bool(keep), JValue::Bool(no_loc)];
         let ok = env.call_method(a, jni_str!("editWrite"), jni_sig!("(JLandroid/graphics/Bitmap;IIIZZ)Z"), &wargs)?.z()?;
-        recycle(env, &out);
+        recycle(env, &dst);
         if !ok {
             return Ok(Err("Couldn't save the copy".into()));
         }

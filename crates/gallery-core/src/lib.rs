@@ -3,6 +3,7 @@
 pub mod media;
 pub mod access;
 pub mod clip;
+pub mod convert;
 pub mod arrange;
 pub mod dates;
 pub mod grid;

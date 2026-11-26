@@ -113,6 +113,11 @@ impl CropScreen {
         self.crop
     }
 
+    /// The picture's upright size.
+    pub fn full(&self) -> (u32, u32) {
+        self.full
+    }
+
     pub fn free(mut self, gl: &Context) {
         if let Some(t) = self.tex.take() {
             t.free(gl);

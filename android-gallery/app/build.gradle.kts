@@ -32,3 +32,8 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 }
+
+dependencies {
+    // HEIC pictures through the phone's HEVC encoder (Apache 2.0).
+    implementation("androidx.heifwriter:heifwriter:1.0.0")
+}

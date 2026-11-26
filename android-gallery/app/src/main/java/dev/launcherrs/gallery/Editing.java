@@ -23,7 +23,7 @@ import java.io.OutputStream;
 final class Editing {
     private Editing() {}
 
-    static final int JPEG = 0, PNG = 1, WEBP = 2;
+    static final int JPEG = 0, PNG = 1, WEBP = 2, HEIC = 3;
 
     /** The original file, with its location kept when we're allowed to read it. */
     static Uri original(Context c, long id) {
@@ -82,6 +82,9 @@ final class Editing {
      *  original's date, camera and (unless `noLocation`) location for JPEGs. */
     static boolean write(Context c, long srcId, Bitmap b, int format, int quality, int fd, boolean keepDetails, boolean noLocation) {
         try (ParcelFileDescriptor pfd = ParcelFileDescriptor.adoptFd(fd)) {
+            // JPEG and our HEIC have no see-through parts: white, not black.
+            if ((format == JPEG || format == HEIC) && b.hasAlpha()) b = onWhite(b);
+            if (format == HEIC) return writeHeic(pfd, b, quality);
             try (OutputStream out = new FileOutputStream(pfd.getFileDescriptor())) {
                 Bitmap.CompressFormat f = format == PNG ? Bitmap.CompressFormat.PNG
                         : format == WEBP ? (Build.VERSION.SDK_INT >= 30 ? Bitmap.CompressFormat.WEBP_LOSSY : Bitmap.CompressFormat.WEBP)
@@ -95,6 +98,87 @@ final class Editing {
             return true;
         } catch (Exception | OutOfMemoryError e) {
             return false;
+        }
+    }
+
+    /** See-through parts on white rather than black. */
+    private static Bitmap onWhite(Bitmap b) {
+        Bitmap w = Bitmap.createBitmap(b.getWidth(), b.getHeight(), Bitmap.Config.ARGB_8888);
+        android.graphics.Canvas cv = new android.graphics.Canvas(w);
+        cv.drawColor(android.graphics.Color.WHITE);
+        cv.drawBitmap(b, 0, 0, null);
+        return w;
+    }
+
+    private static boolean writeHeic(ParcelFileDescriptor pfd, Bitmap b, int quality) throws Exception {
+        if (Build.VERSION.SDK_INT < 28) return false;
+        androidx.heifwriter.HeifWriter w = new androidx.heifwriter.HeifWriter.Builder(pfd.getFileDescriptor(),
+                b.getWidth(), b.getHeight(), androidx.heifwriter.HeifWriter.INPUT_MODE_BITMAP)
+                .setQuality(quality).setMaxImages(1).build();
+        try {
+            w.start();
+            w.addBitmap(b);
+            w.stop(30_000);
+        } finally {
+            w.close();
+        }
+        return true;
+    }
+
+    /** Whether this phone can make HEIC pictures (it needs an HEVC encoder). */
+    static boolean canHeic() {
+        if (Build.VERSION.SDK_INT < 28) return false;
+        for (android.media.MediaCodecInfo i : new android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS).getCodecInfos()) {
+            if (!i.isEncoder()) continue;
+            for (String t : i.getSupportedTypes()) {
+                if (t.equalsIgnoreCase("video/hevc") || t.equalsIgnoreCase("image/vnd.android.heic")) return true;
+            }
+        }
+        return false;
+    }
+
+    /** The whole picture upright at `w` x `h`, for converting. */
+    static Bitmap scaled(Context c, long id, int orientation, int w, int h) {
+        try {
+            if (Build.VERSION.SDK_INT >= 28) {
+                ImageDecoder.Source src = ImageDecoder.createSource(c.getContentResolver(), Thumbs.uri(id, false));
+                return ImageDecoder.decodeBitmap(src, (d, info, s) -> {
+                    d.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
+                    if (w > 0 && h > 0) d.setTargetSize(w, h);
+                });
+            }
+            Bitmap b = whole(c, id);
+            if (b == null) return null;
+            if (orientation != 0) {
+                android.graphics.Matrix m = new android.graphics.Matrix();
+                m.postRotate(orientation);
+                Bitmap r = Bitmap.createBitmap(b, 0, 0, b.getWidth(), b.getHeight(), m, true);
+                if (r != b) b.recycle();
+                b = r;
+            }
+            if (w > 0 && h > 0 && (b.getWidth() != w || b.getHeight() != h)) {
+                Bitmap s = Bitmap.createScaledBitmap(b, w, h, true);
+                if (s != b) b.recycle();
+                b = s;
+            }
+            return b;
+        } catch (Exception | OutOfMemoryError e) {
+            android.util.Log.w("gallery", "convert: reading failed", e);
+            return null;
+        }
+    }
+
+    /** Convert one picture into the open file `fd` (closed here). */
+    static boolean convert(Context c, long id, int orientation, int w, int h, int format, int quality, int fd, boolean keepDetails, boolean noLocation) {
+        Bitmap b = scaled(c, id, orientation, w, h);
+        if (b == null) {
+            try { ParcelFileDescriptor.adoptFd(fd).close(); } catch (Exception ignored) {}
+            return false;
+        }
+        try {
+            return write(c, id, b, format, quality, fd, keepDetails, noLocation);
+        } finally {
+            b.recycle();
         }
     }
 

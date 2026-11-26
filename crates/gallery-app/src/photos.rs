@@ -50,12 +50,13 @@ pub enum Action {
     AskAccess,
     /// Share or delete what's chosen (`chosen()`).
     Share,
+    Convert,
     Move,
     Delete,
 }
 
 /// The selection's bottom buttons, left to right.
-const SEL_BUTTONS: [(Press, &str); 3] = [(Press::SelShare, "SHARE"), (Press::SelMove, "MOVE"), (Press::SelDelete, "DELETE")];
+const SEL_BUTTONS: [(Press, &str); 4] = [(Press::SelShare, "SHARE"), (Press::SelConvert, "CONVERT"), (Press::SelMove, "MOVE"), (Press::SelDelete, "DELETE")];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Menu {
@@ -75,6 +76,7 @@ enum Press {
     SelDone,
     SelAll,
     SelShare,
+    SelConvert,
     SelMove,
     SelDelete,
 }
@@ -790,8 +792,9 @@ impl Photos {
             }
             Press::SelShare if self.selection.count() > 0 => Action::Share,
             Press::SelMove if self.selection.count() > 0 => Action::Move,
+            Press::SelConvert if self.selection.count() > 0 => Action::Convert,
             Press::SelDelete if self.selection.count() > 0 => Action::Delete,
-            Press::SelShare | Press::SelMove | Press::SelDelete => Action::None,
+            Press::SelShare | Press::SelConvert | Press::SelMove | Press::SelDelete => Action::None,
             Press::MenuRow(i) => match self.menu {
                 Menu::Sort => {
                     match self.sort_rows().get(i).and_then(|r| r.1) {

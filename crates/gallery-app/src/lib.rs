@@ -16,6 +16,7 @@ mod library;
 mod mover;
 mod open_with;
 mod clip_screen;
+mod convert_screen;
 mod crop_save;
 mod crop_screen;
 mod photos;
@@ -94,6 +95,8 @@ fn android_main(app: AndroidApp) {
     // The clip screen, the same way.
     let mut clip: Option<clip_screen::ClipScreen> = None;
     let mut closed_clips: Vec<clip_screen::ClipScreen> = Vec::new();
+    // Convert sits over everything (over Crop for SAVE AS…).
+    let mut convert: Option<convert_screen::ConvertScreen> = None;
     let mut viewer_list_stale = false;
     // MOVE: the folder chooser and the items it's for; then the move
     // waiting for Android's yes; then a message for the grid.
@@ -182,6 +185,12 @@ fn android_main(app: AndroidApp) {
             sched.request_redraw();
         }
         for t in input.touches {
+            if let Some(c) = convert.as_mut() {
+                if c.touch(t) == convert_screen::Action::Close {
+                    convert = None;
+                }
+                continue;
+            }
             if let Some(c) = clip.as_mut() {
                 match c.touch(t) {
                     clip_screen::Action::None => {}
@@ -205,11 +214,9 @@ fn android_main(app: AndroidApp) {
                             v.toast(format!("Saved as {name}"));
                         }
                     }
-                    crop_screen::Action::SaveAs(_) => {
-                        if let Some(v) = viewer.as_mut() {
-                            v.toast("Convert comes in the next step".into());
-                        }
-                        closed_crops.extend(crop.take());
+                    crop_screen::Action::SaveAs(cr) => {
+                        let (it, full) = (c.item().clone(), c.full());
+                        convert = Some(convert_screen::ConvertScreen::new(&app, photos_density(&app), vec![it], Some((cr, full)), 0));
                     }
                 }
                 continue;
@@ -359,6 +366,16 @@ fn android_main(app: AndroidApp) {
                     let grid = album.as_ref().unwrap_or(&photos);
                     actions::share(&app, &grid.chosen());
                 }
+                Action::Convert => {
+                    let grid = album.as_ref().unwrap_or(&photos);
+                    let ids: std::collections::HashSet<i64> = grid.chosen().iter().map(|c| c.0).collect();
+                    let (pictures, others): (Vec<_>, Vec<_>) = grid.items().iter().filter(|it| ids.contains(&it.id)).cloned().partition(|it| it.kind == gallery_core::media::Kind::Image);
+                    if pictures.is_empty() {
+                        grid_toast = Some((Instant::now(), "Only pictures can be converted".into()));
+                    } else {
+                        convert = Some(convert_screen::ConvertScreen::new(&app, photos_density(&app), pictures, None, others.len()));
+                    }
+                }
                 Action::Move => {
                     let grid = album.as_ref().unwrap_or(&photos);
                     let ids: std::collections::HashSet<i64> = grid.chosen().iter().map(|c| c.0).collect();
@@ -388,6 +405,23 @@ fn android_main(app: AndroidApp) {
                 }
             }
         }
+        if let Some(c) = convert.as_mut()
+            && let convert_screen::Action::Done(msg) = c.poll()
+        {
+            convert = None;
+            if let Some(cr) = crop.take() {
+                closed_crops.push(cr);
+            }
+            photos.end_selection();
+            if let Some(a) = album.as_mut() {
+                a.end_selection();
+            }
+            match viewer.as_mut() {
+                Some(v) => v.toast(msg),
+                None => grid_toast = Some((Instant::now(), msg)),
+            }
+            sched.request_redraw();
+        }
         if let Some(c) = clip.as_mut()
             && let clip_screen::Action::Saved(name) = c.poll()
         {
@@ -412,7 +446,11 @@ fn android_main(app: AndroidApp) {
         }
         if input.back {
             sched.request_redraw();
-            if let Some(c) = clip.as_mut() {
+            if let Some(c) = convert.as_mut() {
+                if !c.back() {
+                    convert = None;
+                }
+            } else if let Some(c) = clip.as_mut() {
                 if !c.back() {
                     closed_clips.extend(clip.take());
                 }
@@ -512,7 +550,7 @@ fn android_main(app: AndroidApp) {
         if holo_platform::update::take_changed() {
             sched.request_redraw();
         }
-        if crop.as_ref().is_some_and(|c| c.wants_frames()) || clip.as_ref().is_some_and(|c| c.wants_frames()) {
+        if crop.as_ref().is_some_and(|c| c.wants_frames()) || clip.as_ref().is_some_and(|c| c.wants_frames()) || convert.as_ref().is_some_and(|c| c.wants_frames()) {
             sched.request_redraw();
         }
         if thumbs.has_ready() || jobs.has_done() || video::frame_waiting() || actions::has_done() {
@@ -616,7 +654,9 @@ fn android_main(app: AndroidApp) {
                         closed.extend(viewer.take());
                     }
                 }
-                let (anim, missing) = if let Some(c) = clip.as_mut() {
+                let (anim, missing) = if let Some(c) = convert.as_mut() {
+                    c.draw(g.gl(), r, &mut batch, frame, now)
+                } else if let Some(c) = clip.as_mut() {
                     c.draw_preview(g.gl(), frame, screen, now);
                     (c.draw(g.gl(), r, &mut batch, frame, now), Vec::new())
                 } else if let Some(c) = crop.as_mut() {
@@ -642,7 +682,7 @@ fn android_main(app: AndroidApp) {
                 } };
                 thumbs.request(&missing);
                 moving = anim;
-                if viewer.is_none() && crop.is_none() && clip.is_none() && let Some((at, msg)) = grid_toast.as_ref() {
+                if viewer.is_none() && crop.is_none() && clip.is_none() && convert.is_none() && let Some((at, msg)) = grid_toast.as_ref() {
                     if now < *at + Duration::from_millis(2500) {
                         widgets::toast(g.gl(), r, &mut batch, msg, frame.w, frame.h - frame.ins.bottom - 64.0 * d, d);
                         moving = true;
