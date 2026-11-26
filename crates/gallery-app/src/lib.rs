@@ -6,6 +6,7 @@ mod chrome;
 mod input;
 mod library;
 mod system;
+mod thumbs;
 
 use std::time::{Duration, Instant};
 

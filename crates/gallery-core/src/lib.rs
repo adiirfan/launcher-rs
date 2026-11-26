@@ -5,3 +5,4 @@ pub mod access;
 pub mod arrange;
 pub mod dates;
 pub mod grid;
+pub mod thumbq;

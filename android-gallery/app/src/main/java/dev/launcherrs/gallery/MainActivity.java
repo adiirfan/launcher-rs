@@ -118,6 +118,11 @@ public class MainActivity extends NativeActivity {
     /** Rust (library thread): every photo and video, packed. */
     public byte[] queryLibrary(boolean trashed) { return Library.query(this, trashed); }
 
+    /** Rust (thumbnail threads): one square thumbnail, or null. */
+    public byte[] loadThumb(long id, boolean video, int orientation, int size) {
+        return Thumbs.load(this, id, video, orientation, size);
+    }
+
     static native void onInsets(int top, int bottom, int left, int right);
     static native void onAccess(int sdk, boolean images, boolean video, boolean selected, boolean legacy);
     static native void onAsked();
