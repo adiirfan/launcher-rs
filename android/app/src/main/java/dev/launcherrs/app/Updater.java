@@ -28,8 +28,10 @@ final class Updater {
     static final int IDLE = 0, CHECKING = 1, UP_TO_DATE = 2, AVAILABLE = 3,
             DOWNLOADING = 4, INSTALLING = 5, FAILED = 6, NEEDS_PERMISSION = 7;
 
-    private static final String LATEST =
-            "https://api.github.com/repos/adiirfan/launcher-rs/releases/latest";
+    /** Newest releases first. The gallery's releases live in the same repo,
+     *  tagged "gallery-v…", so we pick the newest launcher one ourselves. */
+    private static final String RELEASES =
+            "https://api.github.com/repos/adiirfan/launcher-rs/releases?per_page=30";
     private static final String STATUS = "dev.launcherrs.app.INSTALL_STATUS";
     private static final int TIMEOUT_MS = 15000;
 
@@ -56,26 +58,31 @@ final class Updater {
         onUpdate(CHECKING, "", 0);
         new Thread(() -> {
             try {
-                HttpURLConnection c = open(LATEST);
+                HttpURLConnection c = open(RELEASES);
                 c.setRequestProperty("Accept", "application/vnd.github+json");
                 int code = c.getResponseCode();
                 if (code != 200) {
                     onUpdate(FAILED, "GitHub answered " + code, 0);
                     return;
                 }
-                JSONObject release = new JSONObject(readAll(c.getInputStream()));
-                String tag = release.getString("tag_name");
-                String latest = tag.startsWith("v") ? tag.substring(1) : tag;
-                String url = null;
-                JSONArray assets = release.getJSONArray("assets");
-                for (int i = 0; i < assets.length(); i++) {
-                    JSONObject asset = assets.getJSONObject(i);
-                    if (asset.getString("name").endsWith(".apk")) {
-                        url = asset.getString("browser_download_url");
+                JSONArray releases = new JSONArray(readAll(c.getInputStream()));
+                String latest = null, url = null;
+                for (int r = 0; r < releases.length() && latest == null; r++) {
+                    JSONObject release = releases.getJSONObject(r);
+                    if (release.optBoolean("draft") || release.optBoolean("prerelease")) continue;
+                    String version = launcherVersion(release.getString("tag_name"));
+                    if (version == null) continue;
+                    JSONArray assets = release.getJSONArray("assets");
+                    for (int i = 0; i < assets.length(); i++) {
+                        JSONObject asset = assets.getJSONObject(i);
+                        if (asset.getString("name").endsWith(".apk")) {
+                            url = asset.getString("browser_download_url");
+                        }
                     }
+                    if (url != null) latest = version;
                 }
                 String mine = myVersion(a);
-                if (url != null && newer(latest, mine)) {
+                if (latest != null && newer(latest, mine)) {
                     apkUrl = url;
                     onUpdate(AVAILABLE, latest, 0);
                 } else {
@@ -193,6 +200,14 @@ final class Updater {
         while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
         in.close();
         return out.toString("UTF-8");
+    }
+
+    /** "v0.1.5" or "launcher-v0.1.5" → "0.1.5"; anything else (a gallery
+     *  release) → null. */
+    static String launcherVersion(String tag) {
+        String v = tag.startsWith("launcher-v") ? tag.substring(10)
+                : tag.startsWith("v") ? tag.substring(1) : null;
+        return v != null && !v.isEmpty() && Character.isDigit(v.charAt(0)) ? v : null;
     }
 
     /** Whether version `a` (like "0.1.10") is newer than `b`. */
