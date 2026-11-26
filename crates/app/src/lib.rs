@@ -21,6 +21,7 @@ mod refresh;
 mod keyboard;
 mod listener;
 mod lookup;
+mod update;
 mod system;
 mod vsync;
 
@@ -229,6 +230,9 @@ fn android_main(app: AndroidApp) {
                 }
                 home.go_to_first_page(now);
             }
+            sched.request_redraw();
+        }
+        if update::take_changed() {
             sched.request_redraw();
         }
         if let Some(state) = keyboard::take() {
