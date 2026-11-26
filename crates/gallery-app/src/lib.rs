@@ -165,6 +165,10 @@ fn android_main(app: AndroidApp) {
                     }
                     MainEvent::TerminateWindow { .. } => {
                         motion::save();
+                        // Left while showing another app's photo (Home, not
+                        // Back): that app is no longer waiting, so the next
+                        // Back goes to the grid instead of leaving the gallery.
+                        outside = false;
                         if let Some(g) = gfx.as_mut() {
                             g.suspend();
                         }
@@ -414,6 +418,7 @@ fn android_main(app: AndroidApp) {
             match action {
                 Action::None => {}
                 Action::Open(i) => {
+                    outside = false;
                     let grid = album.as_ref().unwrap_or(&photos);
                     viewer = Some(Viewer::open(&app, photos_density(&app), grid.items().clone(), grid.arranged().order.clone(), i as usize, screen_w));
                     viewer_source = ViewerSource::Grid;
