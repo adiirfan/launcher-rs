@@ -5,6 +5,7 @@ mod albums_screen;
 mod bars;
 mod gif_player;
 mod photo_tex;
+mod video;
 mod viewer;
 mod viewer_jobs;
 mod chrome;
@@ -160,7 +161,7 @@ fn android_main(app: AndroidApp) {
                 Action::None => {}
                 Action::Open(i) => {
                     let grid = album.as_ref().unwrap_or(&photos);
-                    viewer = Some(Viewer::open(photos_density(&app), grid.items().clone(), grid.arranged().order.clone(), i as usize, screen_w));
+                    viewer = Some(Viewer::open(&app, photos_density(&app), grid.items().clone(), grid.arranged().order.clone(), i as usize, screen_w));
                 }
                 Action::Albums => on_albums = true,
                 Action::Back => {
@@ -209,7 +210,7 @@ fn android_main(app: AndroidApp) {
         if library::take_asked() {
             sched.request_redraw();
         }
-        if thumbs.has_ready() || jobs.has_done() {
+        if thumbs.has_ready() || jobs.has_done() || video::frame_waiting() {
             sched.request_redraw();
         }
 

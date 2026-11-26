@@ -22,6 +22,7 @@ public class MainActivity extends NativeActivity {
     static { System.loadLibrary("gallery"); } // so Java finds the native methods
 
     private ContentObserver observer;
+    private Player player;
     private static final int ASK_ACCESS = 1;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
@@ -64,6 +65,12 @@ public class MainActivity extends NativeActivity {
         if (observer != null) getContentResolver().unregisterContentObserver(observer);
         observer = null;
         super.onStop();
+    }
+
+    /** Going to the background pauses a video; it keeps its place. */
+    @Override protected void onPause() {
+        if (player != null) player.pause();
+        super.onPause();
     }
 
     @Override protected void onResume() {
@@ -145,6 +152,25 @@ public class MainActivity extends NativeActivity {
     /** Rust (INFO panel): camera, aperture, shutter, ISO, location, one per line. */
     public String pictureDetails(long id) { return String.join("\n", Pictures.details(this, id)); }
 
+    private Player player() {
+        if (player == null) player = new Player(this);
+        return player;
+    }
+
+    /** Rust (drawing thread): the video player. See Player. */
+    public void videoOpen(long id, int texName) { player().open(id, texName); }
+    public float[] videoUpdate() { return player().update(); }
+    public void videoPlay() { player().play(); }
+    public void videoPause() { player().pause(); }
+    public void videoSeek(int ms) { player().seek(ms); }
+    public int videoPosition() { return player().position(); }
+    public int videoDuration() { return player().duration(); }
+    public boolean videoPlaying() { return player().playing(); }
+    public void videoMute(boolean muted) { player().setMuted(muted); }
+    public void videoClose() { player().close(); }
+
+    static native void onVideoFrame();
+    static native void onVideoState(int state, int w, int h);
     static native void onInsets(int top, int bottom, int left, int right);
     static native void onAccess(int sdk, boolean images, boolean video, boolean selected, boolean legacy);
     static native void onAsked();

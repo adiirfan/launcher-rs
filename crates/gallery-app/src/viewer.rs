@@ -11,7 +11,8 @@ use gallery_core::format;
 use gallery_core::media::{Kind, MediaItem};
 use gallery_core::viewer_list::index_after_removal;
 use gallery_core::zoom::Zoom;
-use glow::Context;
+use android_activity::AndroidApp;
+use glow::{Context, HasContext};
 use holo_platform::fonts::Weight;
 use holo_platform::holo::{self, TEXT_QUIET, WHITE};
 use holo_platform::render::Renderer;
@@ -25,10 +26,15 @@ use crate::input::{Touch, TouchKind};
 use crate::photo_tex::{PhotoDraw, Tex, Upload};
 use crate::photos::Frame;
 use crate::thumbs::{self, Thumbs};
+use crate::video::{self, VideoDraw};
 use crate::viewer_jobs::{Done, Job, Jobs};
 use crate::widgets;
 
 const BOTTOM_DP: f32 = 64.0;
+/// The video's time and seek bar, above the bottom bar.
+const SEEK_DP: f32 = 44.0;
+/// The play button in the middle of a video.
+const PLAY_R_DP: f32 = 36.0;
 /// Full detail is decoded once the picture has been still this long.
 const DETAIL_AFTER: Duration = Duration::from_millis(150);
 const DOUBLE_TAP: Duration = Duration::from_millis(300);
@@ -60,6 +66,9 @@ enum Button {
     Edit,
     Info,
     Delete,
+    /// The middle of a video: play or pause.
+    Play,
+    Sound,
 }
 
 struct Pic {
@@ -110,6 +119,21 @@ enum Mode {
     Pinch { dist: f32, mid: (f32, f32) },
     /// The rest of a gesture that already did something else.
     Ignore,
+    /// Dragging along the video's seek bar.
+    Seek,
+}
+
+struct Video {
+    id: i64,
+    tex: glow::Texture,
+    prepared: bool,
+    playing: bool,
+    /// The newest frame's texture transform, once one has arrived.
+    tm: Option<[f32; 16]>,
+    pos: u64,
+    dur: u64,
+    /// Where the finger is on the seek bar while dragging, 0..1.
+    drag: Option<f32>,
 }
 
 pub struct Viewer {
@@ -131,8 +155,14 @@ pub struct Viewer {
     details: Option<(i64, [String; 5])>,
     bars: bool,
     info: bool,
-    toast: Option<Instant>,
+    toast: Option<(Instant, &'static str)>,
     mode: Mode,
+    app: AndroidApp,
+    video: Option<Video>,
+    /// Tapped play: the video opens on the next frame (it needs the GL context).
+    open_video: Option<i64>,
+    video_draw: Option<VideoDraw>,
+    muted: bool,
     press: Option<Button>,
     last_tap: Option<(Instant, f32, f32)>,
     pending_tap: Option<Instant>,
@@ -140,7 +170,7 @@ pub struct Viewer {
 }
 
 impl Viewer {
-    pub fn open(d: f32, items: Arc<Vec<MediaItem>>, order: Vec<u32>, index: usize, width: f32) -> Viewer {
+    pub fn open(app: &AndroidApp, d: f32, items: Arc<Vec<MediaItem>>, order: Vec<u32>, index: usize, width: f32) -> Viewer {
         let mut pager = Pager::new_with_slop(order.len().max(1), width.max(1.0), 8.0 * d);
         pager.jump_to(index);
         Viewer {
@@ -162,6 +192,11 @@ impl Viewer {
             info: false,
             toast: None,
             mode: Mode::Idle,
+            app: app.clone(),
+            video: None,
+            open_video: None,
+            video_draw: None,
+            muted: false,
             press: None,
             last_tap: None,
             pending_tap: None,
@@ -208,6 +243,55 @@ impl Viewer {
         }
         for p in self.pending.drain(..) {
             p.cancel(gl);
+        }
+        self.close_video(gl);
+    }
+
+    fn close_video(&mut self, gl: &Context) {
+        if let Some(v) = self.video.take() {
+            video::close(&self.app);
+            unsafe { gl.delete_texture(v.tex) };
+        }
+        self.open_video = None;
+    }
+
+    /// The player's news, the newest frame, and where playback is.
+    fn tend_video(&mut self, gl: &Context) {
+        if let Some(id) = self.open_video.take()
+            && Some(id) == self.current
+        {
+            self.close_video(gl);
+            if let Some(tex) = video::new_texture(gl) {
+                video::open(&self.app, id, tex);
+                self.video = Some(Video { id, tex, prepared: false, playing: false, tm: None, pos: 0, dur: 0, drag: None });
+            }
+        }
+        let events = video::take_events();
+        let Some(v) = self.video.as_mut() else { return };
+        for e in events {
+            match e {
+                video::Event::Prepared(..) => {
+                    v.prepared = true;
+                    video::play(&self.app);
+                    v.playing = true;
+                }
+                video::Event::Completed | video::Event::Paused => v.playing = false,
+                video::Event::Error => {
+                    self.toast = Some((Instant::now(), "Can't play this video"));
+                    self.close_video(gl);
+                    return;
+                }
+            }
+        }
+        if video::frame_waiting()
+            && let Some(tm) = video::update(&self.app)
+        {
+            v.tm = Some(tm);
+        }
+        if v.prepared {
+            let (pos, dur) = video::position(&self.app);
+            v.pos = pos;
+            v.dur = dur;
         }
     }
 
@@ -320,6 +404,7 @@ impl Viewer {
         if let Some(t) = self.gif.take().and_then(|g| g.tex) {
             t.free(gl);
         }
+        self.close_video(gl);
     }
 
     /// The part on screen needs more detail than the screen-size copy has.
@@ -358,6 +443,7 @@ impl Viewer {
             self.arrive(gl);
         }
         let page = self.pager.page();
+        self.tend_video(gl);
 
         // What to decode, most wanted first.
         let mut want = Vec::new();
@@ -408,7 +494,8 @@ impl Viewer {
                 self.info = false;
             }
         }
-        moving |= self.pending_tap.is_some() || self.toast.is_some_and(|t| now < t + TOAST_FOR);
+        moving |= self.pending_tap.is_some() || self.toast.is_some_and(|t| now < t.0 + TOAST_FOR);
+        moving |= self.open_video.is_some() || self.video.as_ref().is_some_and(|v| v.playing && v.tm.is_none());
         // Keep drawing until the zoomed picture has been still long enough
         // to ask for full detail.
         moving |= self.zoom.is_some_and(|z| !z.is_fit()) && now < self.zoom_changed + DETAIL_AFTER + Duration::from_millis(40);
@@ -440,18 +527,34 @@ impl Viewer {
                 let (rx, ry, rw, rh) = reg.rect;
                 pd.draw(gl, &reg.tex, (x + shift + rx as f32 * s, y + ry as f32 * s, rw as f32 * s, rh as f32 * s), (0.0, 0.0, 1.0, 1.0), screen);
             }
-            // Videos play in a later step; until then their thumbnail and a play sign.
-            if it.kind == Kind::Video || (!self.pics.contains_key(&it.id) && gif_tex.is_none()) {
+            let playing_here = self.video.as_ref().filter(|v| v.id == it.id && is_current);
+            let frame_tm = playing_here.and_then(|v| v.tm.map(|tm| (v.tex, tm)));
+            if let Some((tex, tm)) = frame_tm {
+                let vd = self.video_draw.get_or_insert_with(|| VideoDraw::new(gl).expect("video program"));
+                vd.draw(gl, tex, (x + shift, y, w, h), &tm, screen);
+            } else if it.kind == Kind::Video || (!self.pics.contains_key(&it.id) && gif_tex.is_none()) {
+                // Until the picture (or the video's first frame) arrives: its thumbnail.
                 let side = (f.w.min(f.h) * 0.6).min(w.max(h));
                 let tile = Rect::new(f.w / 2.0 - side / 2.0 + shift, f.h / 2.0 - side / 2.0, side, side);
                 if let Some(uv) = r.icon_uv(&thumbs::key(it.id)) {
                     batch.image(tile, uv, 0.0, 1.0);
                 }
-                if it.kind == Kind::Video {
+            }
+            // The play button: always on a stopped video, with the bars on a playing one.
+            if it.kind == Kind::Video {
+                let playing = playing_here.is_some_and(|v| v.playing);
+                if !playing || (self.bars && is_current) {
                     let (cx, cy) = (f.w / 2.0 + shift, f.h / 2.0);
-                    batch.circle(cx, cy, 36.0 * d, Rgba::hex(0xFFFFFF));
-                    batch.circle(cx, cy, 34.0 * d, Rgba::hex(0x000000).with_alpha(0.5));
-                    widgets::play_triangle(batch, cx - 8.0 * d, cy, 26.0 * d, Rgba::hex(WHITE));
+                    let pressed = self.press == Some(Button::Play);
+                    batch.circle(cx, cy, PLAY_R_DP * d, Rgba::hex(0xFFFFFF));
+                    batch.circle(cx, cy, (PLAY_R_DP - 2.0) * d, if pressed { Rgba::hex(holo::accent()).with_alpha(0.6) } else { Rgba::hex(0x000000).with_alpha(0.5) });
+                    if playing {
+                        for dx in [-7.0, 3.0] {
+                            batch.rect(Rect::new(cx + dx * d, cy - 11.0 * d, 5.0 * d, 22.0 * d), Rgba::hex(WHITE), 0.0);
+                        }
+                    } else {
+                        widgets::play_triangle(batch, cx - 8.0 * d, cy, 26.0 * d, Rgba::hex(WHITE));
+                    }
                 }
             }
         }
@@ -538,11 +641,17 @@ impl Viewer {
             r.text_spaced(gl, batch, label, rc.x + (rc.w - lw) / 2.0, rc.y + 50.0 * d, em, 0.6 * d, rc.w, c, Weight::Medium);
         }
 
-        if self.info {
-            self.draw_info(gl, r, batch, f, it, by);
+        let mut above = by;
+        if it.kind == Kind::Video {
+            above = by - SEEK_DP * d;
+            self.draw_seek(gl, r, batch, f, it, above);
         }
-        if self.toast.is_some_and(|t| now < t + TOAST_FOR) {
-            let msg = "Coming in a later version";
+        if self.info {
+            self.draw_info(gl, r, batch, f, it, above);
+        }
+        if let Some((t, msg)) = self.toast.filter(|t| now < t.0 + TOAST_FOR) {
+            let _ = t;
+            let by = above;
             let em = 14.0 * d;
             let mw = r.measure(msg, em, f.w, Weight::Regular);
             let (w, h) = (mw + 40.0 * d, 40.0 * d);
@@ -550,6 +659,60 @@ impl Viewer {
             batch.rect(rc, Rgba::hex(0x333333).with_alpha(0.95), 4.0 * d);
             r.text(gl, batch, msg, rc.x + 20.0 * d, widgets::baseline(r, rc.y + h / 2.0, em, d), em, mw + 1.0, white, Weight::Regular);
         }
+    }
+
+    fn seek_rect(&self, f: &Frame) -> Rect {
+        let d = self.d;
+        Rect::new(0.0, self.bottom_y(f) - SEEK_DP * d, f.w, SEEK_DP * d)
+    }
+
+    /// The bar's track: x from, x to.
+    fn seek_track(&self, f: &Frame) -> (f32, f32) {
+        let d = self.d;
+        (f.ins.left + 16.0 * d + 48.0 * d, f.w - f.ins.right - 16.0 * d - 32.0 * d - 48.0 * d)
+    }
+
+    /// "0:12 ━━━●──── 1:04 🔊", as the mockup.
+    fn draw_seek(&self, gl: &Context, r: &mut Renderer, batch: &mut Batch, f: &Frame, it: &MediaItem, y: f32) {
+        let d = self.d;
+        let accent = Rgba::hex(holo::accent());
+        let white = Rgba::hex(WHITE);
+        let rc = self.seek_rect(f);
+        batch.rect(rc, Rgba::hex(0x000000).with_alpha(BAR_BG), 0.0);
+        let v = self.video.as_ref().filter(|v| v.id == it.id);
+        let dur = v.map(|v| v.dur).filter(|&d| d > 0).unwrap_or(it.duration_ms);
+        let frac = match v {
+            Some(v) => v.drag.unwrap_or(if dur > 0 { v.pos as f32 / dur as f32 } else { 0.0 }),
+            None => 0.0,
+        }
+        .clamp(0.0, 1.0);
+        let pos = (frac * dur as f32) as u64;
+        let cy = y + SEEK_DP * d / 2.0;
+        let em = 13.0 * d;
+        let base = widgets::baseline(r, cy, em, d);
+        r.text(gl, batch, &format::duration(pos), f.ins.left + 16.0 * d, base, em, 48.0 * d, white, Weight::Regular);
+        let (x0, x1) = self.seek_track(f);
+        batch.rect(Rect::new(x0, cy - 1.5 * d, x1 - x0, 3.0 * d), Rgba::hex(0x555555), 0.0);
+        let xp = x0 + (x1 - x0) * frac;
+        batch.rect(Rect::new(x0, cy - 1.5 * d, xp - x0, 3.0 * d), accent, 0.0);
+        batch.circle(xp, cy, 7.5 * d, accent);
+        r.text(gl, batch, &format::duration(dur), x1 + 12.0 * d, base, em, 48.0 * d, white, Weight::Regular);
+        // Sound: a speaker, with waves unless muted.
+        let (sx, sy, u) = (f.w - f.ins.right - 16.0 * d - 20.0 * d, cy - 10.0 * d, 20.0 * d / 24.0);
+        let lw = 1.8 * u;
+        icon(batch, &[&[(4.0, 9.0), (8.0, 9.0), (13.0, 5.0), (13.0, 19.0), (8.0, 15.0), (4.0, 15.0), (4.0, 9.0)]], sx, sy, u, lw, white);
+        if self.muted {
+            icon(batch, &[&[(16.0, 9.0), (22.0, 15.0)], &[(22.0, 9.0), (16.0, 15.0)]], sx, sy, u, lw, white);
+        } else {
+            icon(batch, &[&[(16.0, 9.0), (17.5, 12.0), (16.0, 15.0)], &[(18.5, 6.5), (21.0, 12.0), (18.5, 17.5)]], sx, sy, u, lw, white);
+        }
+        if self.press == Some(Button::Sound) {
+            batch.rect(Rect::new(f.w - f.ins.right - 56.0 * d, y, 56.0 * d, SEEK_DP * d), accent.with_alpha(0.3), 0.0);
+        }
+    }
+
+    fn is_video(&self) -> bool {
+        self.item(self.pager.page()).is_some_and(|i| i.kind == Kind::Video)
     }
 
     fn info_rows(&self, f: &Frame, it: &MediaItem) -> Vec<(&'static str, String)> {
@@ -597,6 +760,16 @@ impl Viewer {
 
     fn button_at(&self, x: f32, y: f32) -> Option<Button> {
         let f = self.last?;
+        if self.is_video() {
+            let playing = self.video.as_ref().is_some_and(|v| v.playing);
+            let r = PLAY_R_DP * self.d;
+            if (!playing || self.bars) && (x - f.w / 2.0).hypot(y - f.h / 2.0) <= r * 1.3 {
+                return Some(Button::Play);
+            }
+            if self.bars && self.seek_rect(&f).contains(x, y) && x >= f.w - f.ins.right - 56.0 * self.d {
+                return Some(Button::Sound);
+            }
+        }
         if !self.bars {
             return None;
         }
@@ -605,7 +778,8 @@ impl Viewer {
 
     fn in_bars(&self, y: f32) -> bool {
         let Some(f) = self.last else { return false };
-        self.bars && (y < self.top_h(&f) || y >= self.bottom_y(&f))
+        let bottom = if self.is_video() { self.bottom_y(&f) - SEEK_DP * self.d } else { self.bottom_y(&f) };
+        self.bars && (y < self.top_h(&f) || y >= bottom)
     }
 
     pub fn touch(&mut self, t: Touch) -> Action {
@@ -613,6 +787,17 @@ impl Viewer {
         match t.kind {
             TouchKind::Down => {
                 self.press = self.button_at(t.x, t.y);
+                if let (Some(f), None) = (self.last, self.press)
+                    && self.bars
+                    && self.is_video()
+                    && self.seek_rect(&f).contains(t.x, t.y)
+                    && let (x0, x1) = self.seek_track(&f)
+                    && let Some(v) = self.video.as_mut().filter(|v| v.prepared)
+                {
+                    v.drag = Some(((t.x - x0) / (x1 - x0)).clamp(0.0, 1.0));
+                    self.mode = Mode::Seek;
+                    return Action::None;
+                }
                 self.mode = if self.press.is_some() || self.in_bars(t.y) { Mode::Ignore } else { Mode::Undecided { x: t.x, y: t.y, t: t.t } };
             }
             TouchKind::Move => match self.mode {
@@ -659,6 +844,14 @@ impl Viewer {
                         self.mode = Mode::Pinch { dist: nd, mid: nm };
                     }
                 }
+                Mode::Seek => {
+                    if let Some(f) = self.last {
+                        let (x0, x1) = self.seek_track(&f);
+                        if let Some(v) = self.video.as_mut() {
+                            v.drag = Some(((t.x - x0) / (x1 - x0)).clamp(0.0, 1.0));
+                        }
+                    }
+                }
                 Mode::Idle | Mode::Ignore => {
                     if self.press.is_some() && self.button_at(t.x, t.y) != self.press {
                         self.press = None;
@@ -683,6 +876,15 @@ impl Viewer {
             }
             TouchKind::Up => {
                 let mode = std::mem::replace(&mut self.mode, Mode::Idle);
+                if let Mode::Seek = mode
+                    && let Some(v) = self.video.as_mut()
+                    && let Some(frac) = v.drag.take()
+                {
+                    let ms = (frac * v.dur as f32) as u64;
+                    v.pos = ms;
+                    video::seek(&self.app, ms);
+                    return Action::None;
+                }
                 if let Some(b) = self.press.take() {
                     return self.pressed(b, t.t);
                 }
@@ -736,7 +938,31 @@ impl Viewer {
                 Action::None
             }
             Button::Edit => {
-                self.toast = Some(t);
+                self.toast = Some((t, "Coming in a later version"));
+                Action::None
+            }
+            Button::Play => {
+                match self.video.as_mut().filter(|v| v.id == id) {
+                    Some(v) if v.playing => {
+                        video::pause(&self.app);
+                        v.playing = false;
+                    }
+                    Some(v) if v.prepared => {
+                        // At the end: from the start again.
+                        if v.dur > 0 && v.pos + 250 >= v.dur {
+                            video::seek(&self.app, 0);
+                        }
+                        video::play(&self.app);
+                        v.playing = true;
+                    }
+                    Some(_) => {}
+                    None => self.open_video = Some(id),
+                }
+                Action::None
+            }
+            Button::Sound => {
+                self.muted = !self.muted;
+                video::mute(&self.app, self.muted);
                 Action::None
             }
         }
