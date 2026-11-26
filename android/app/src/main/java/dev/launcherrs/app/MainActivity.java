@@ -50,8 +50,10 @@ public class MainActivity extends NativeActivity {
                         android.view.WindowInsets.Type.systemBars() | android.view.WindowInsets.Type.displayCutout());
                 onInsets(i.top, i.bottom, i.left, i.right);
             } else {
-                onInsets(insets.getSystemWindowInsetTop(), insets.getSystemWindowInsetBottom(),
-                        insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetRight());
+                // "Stable" sizes are the bars alone; the plain ones grow to
+                // include the keyboard while it's open.
+                onInsets(insets.getStableInsetTop(), insets.getStableInsetBottom(),
+                        insets.getStableInsetLeft(), insets.getStableInsetRight());
             }
             return v.onApplyWindowInsets(insets);
         });

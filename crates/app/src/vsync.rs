@@ -20,6 +20,10 @@ impl Vsync {
     /// Must be made on the thread that polls for events: Android delivers the
     /// call while that thread waits.
     pub fn new() -> Option<Vsync> {
+        // A loop from before an activity rebuild may have left a request
+        // that will never be answered; start clean or none is ever sent.
+        POSTED.store(false, Ordering::Release);
+        TICK_NS.store(0, Ordering::Release);
         let choreographer = unsafe { sys::AChoreographer_getInstance() };
         (!choreographer.is_null()).then_some(Vsync { choreographer })
     }

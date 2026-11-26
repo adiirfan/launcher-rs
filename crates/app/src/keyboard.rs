@@ -1,7 +1,7 @@
 //! The keyboard bridge: Java's input view hands us text; we ask Java to show
 //! or hide the keyboard.
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 use std::time::{Duration, Instant};
 
@@ -19,11 +19,15 @@ static ACTION: Mutex<bool> = Mutex::new(false);
 static HOME: Mutex<bool> = Mutex::new(false);
 static PERMISSION: Mutex<Option<(i32, bool)>> = Mutex::new(None);
 static TRIM: Mutex<Option<i32>> = Mutex::new(None);
-static WAKER: OnceLock<AndroidAppWaker> = OnceLock::new();
+/// Wakes the current main loop. Android can rebuild the activity inside the
+/// same process (a font or language change, sometimes after a long sleep);
+/// the new loop then replaces this, or text and Home would wake a loop
+/// that no longer exists.
+static WAKER: Mutex<Option<AndroidAppWaker>> = Mutex::new(None);
 
-/// Call once at start so keyboard events can wake the main loop.
+/// Call at the start of every main loop so keyboard events can wake it.
 pub fn init(app: &AndroidApp) {
-    let _ = WAKER.set(app.create_waker());
+    *WAKER.lock().unwrap() = Some(app.create_waker());
 }
 
 pub fn show(app: &AndroidApp, show: bool) {
@@ -102,7 +106,7 @@ pub fn take_action() -> bool {
 }
 
 pub(crate) fn wake() {
-    if let Some(w) = WAKER.get() {
+    if let Some(w) = WAKER.lock().unwrap().as_ref() {
         w.wake();
     }
 }

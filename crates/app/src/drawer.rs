@@ -16,12 +16,12 @@ use launcher_draw::batch::Batch;
 use launcher_draw::{Rect, Rgba};
 
 use crate::contacts::{self, Contact};
+use crate::lookup;
 use crate::fonts::Weight;
 use crate::holo::{self, BLACK, WHITE};
 use crate::home::{Touch, TouchKind};
 use crate::icons::Icons;
 use crate::render::Renderer;
-use crate::settings_pages;
 
 const OPEN: Duration = Duration::from_millis(220);
 const CLOSE: Duration = Duration::from_millis(180);
@@ -92,6 +92,8 @@ pub struct Drawer {
     available: Option<HashSet<&'static str>>,
     contacts: Vec<Contact>,
     contacts_for: Option<String>,
+    /// The query last handed to the lookup thread.
+    asked: Option<String>,
     permission: Permission,
     /// Check whether the permission was turned on elsewhere (in Settings).
     recheck: bool,
@@ -124,6 +126,7 @@ impl Drawer {
             available: None,
             contacts: Vec::new(),
             contacts_for: None,
+            asked: None,
             permission: Permission::Unknown,
             recheck: false,
             scroller: Scroller::new(8.0 * density, density),
@@ -249,21 +252,33 @@ impl Drawer {
         } else if self.recheck && self.permission != Permission::Granted && contacts::has_permission(app) {
             self.permission = Permission::Granted;
             self.contacts_for = None;
+            self.asked = None;
             redraw = true;
         }
         self.recheck = false;
         if !self.has_query() {
             return redraw;
         }
-        if self.available.is_none() {
-            self.available = Some(settings_pages::available(app));
+        // Both lookups run on their own thread; here only hand over and pick up.
+        if self.available.is_none()
+            && let Some(pages) = lookup::settings_pages()
+        {
+            self.available = Some(pages);
             self.results_gen = None;
             redraw = true;
         }
-        if self.permission == Permission::Granted && self.contacts_for.as_deref() != Some(self.query.as_str()) {
-            self.contacts = contacts::search(app, &self.query, MAX_CONTACTS);
-            self.contacts_for = Some(self.query.clone());
-            redraw = true;
+        if self.permission == Permission::Granted {
+            if let Some((q, found)) = lookup::take_contacts()
+                && q == self.query
+            {
+                self.contacts = found;
+                self.contacts_for = Some(q);
+                redraw = true;
+            }
+            if self.contacts_for.as_deref() != Some(self.query.as_str()) && self.asked.as_deref() != Some(self.query.as_str()) {
+                lookup::want_contacts(&self.query, MAX_CONTACTS);
+                self.asked = Some(self.query.clone());
+            }
         }
         redraw
     }
@@ -276,6 +291,7 @@ impl Drawer {
             Permission::Refused { can_ask: contacts::can_ask_again(app) }
         };
         self.contacts_for = None;
+        self.asked = None;
     }
 
     /// Back on screen (from Settings, say): see if the permission was turned
@@ -291,6 +307,7 @@ impl Drawer {
         self.results_gen = None;
         self.contacts = Vec::new();
         self.contacts_for = None;
+        self.asked = None;
         self.available = None;
         self.settings = Vec::new();
         self.metrics = None;
