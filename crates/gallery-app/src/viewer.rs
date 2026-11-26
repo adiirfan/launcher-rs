@@ -270,6 +270,11 @@ impl Viewer {
         self.edit_menu.take().is_some() || std::mem::take(&mut self.info)
     }
 
+    /// One of the viewer's items.
+    pub fn item_by_id(&self, id: i64) -> Option<&MediaItem> {
+        self.items.iter().find(|i| i.id == id)
+    }
+
     /// A short message over the bottom bar ("Saved as …").
     pub fn toast(&mut self, msg: String) {
         self.toast = Some((Instant::now(), msg));

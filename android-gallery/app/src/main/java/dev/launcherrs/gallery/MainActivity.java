@@ -253,6 +253,15 @@ public class MainActivity extends NativeActivity {
     public int saverOpenFd(String uri, String mode) { return Saver.openFd(this, uri, mode); }
     public boolean saverFinish(String uri, long takenMs) { return Saver.finish(this, uri, takenMs); }
     public void saverAbandon(String uri) { Saver.abandon(this, uri); }
+
+    // Editing pictures (Editing.java); called from Rust worker threads.
+    public android.graphics.Bitmap editRegion(long id, int x, int y, int w, int h) { return Editing.region(this, id, x, y, w, h); }
+    public android.graphics.Bitmap editWhole(long id) { return Editing.whole(this, id); }
+    public android.graphics.Bitmap editBlank(int w, int h) { return Editing.blank(w, h); }
+    public boolean editWrite(long srcId, android.graphics.Bitmap b, int format, int quality, int fd, boolean keepDetails, boolean noLocation) {
+        return Editing.write(this, srcId, b, format, quality, fd, keepDetails, noLocation);
+    }
+    public boolean editLossless(long id, int fd, int orientation) { return Editing.losslessRotate(this, id, fd, orientation); }
     public int sdk() { return Build.VERSION.SDK_INT; }
 
     @Override protected void onActivityResult(int request, int result, Intent data) {

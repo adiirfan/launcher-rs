@@ -65,6 +65,11 @@ impl Tex {
         unsafe { gl.delete_texture(self.tex) };
     }
 
+    /// The texture itself, for screens with their own drawing program.
+    pub fn raw(&self) -> glow::Texture {
+        self.tex
+    }
+
 }
 
 /// A picture going onto the graphics chip a few rows per frame, so a big

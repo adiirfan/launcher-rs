@@ -9,6 +9,7 @@ pub mod thumbq;
 pub mod format;
 pub mod albums;
 pub mod copies;
+pub mod crop;
 pub mod zoom;
 pub mod viewer_list;
 pub mod selection;

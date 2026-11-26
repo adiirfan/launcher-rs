@@ -14,7 +14,10 @@ mod chrome;
 mod input;
 mod library;
 mod open_with;
+mod crop_save;
+mod crop_screen;
 mod photos;
+mod pixels;
 mod saving;
 mod settings_screen;
 mod system;
@@ -83,6 +86,9 @@ fn android_main(app: AndroidApp) {
     let mut viewer: Option<Viewer> = None;
     // Closed viewers whose pictures still need freeing (needs the GL context).
     let mut closed: Vec<Viewer> = Vec::new();
+    // The crop screen sits over the viewer; closed ones wait for the GL context.
+    let mut crop: Option<crop_screen::CropScreen> = None;
+    let mut closed_crops: Vec<crop_screen::CropScreen> = Vec::new();
     let mut viewer_list_stale = false;
     let mut photo_draw: Option<photo_tex::PhotoDraw> = None;
     let mut screen_w = 1080.0f32;
@@ -166,6 +172,25 @@ fn android_main(app: AndroidApp) {
             sched.request_redraw();
         }
         for t in input.touches {
+            if let Some(c) = crop.as_mut() {
+                match c.touch(t) {
+                    crop_screen::Action::None => {}
+                    crop_screen::Action::Close => closed_crops.extend(crop.take()),
+                    crop_screen::Action::Saved(name) => {
+                        closed_crops.extend(crop.take());
+                        if let Some(v) = viewer.as_mut() {
+                            v.toast(format!("Saved as {name}"));
+                        }
+                    }
+                    crop_screen::Action::SaveAs(_) => {
+                        if let Some(v) = viewer.as_mut() {
+                            v.toast("Convert comes in the next step".into());
+                        }
+                        closed_crops.extend(crop.take());
+                    }
+                }
+                continue;
+            }
             if let Some(v) = viewer.as_mut() {
                 let act = v.touch(t);
                 let item = |id: i64| photos.items().iter().find(|i| i.id == id).cloned();
@@ -191,7 +216,14 @@ fn android_main(app: AndroidApp) {
                     }
                     viewer::Action::Edit(id, kind) => {
                         log::info!("edit {kind:?}");
-                        let _ = id;
+                        let found = v.item_by_id(id).cloned();
+                        match (kind, found) {
+                            (viewer::EditKind::Crop, Some(it)) => {
+                                video::pause(&app);
+                                crop = Some(crop_screen::CropScreen::new(&app, photos_density(&app), it));
+                            }
+                            _ => v.toast("Comes in the next step".into()),
+                        }
                     }
                     viewer::Action::Favourite(id) => {
                         if let Some(it) = item(id) {
@@ -302,9 +334,26 @@ fn android_main(app: AndroidApp) {
                 }
             }
         }
+        if let Some(c) = crop.as_mut() {
+            match c.poll() {
+                crop_screen::Action::Saved(name) => {
+                    closed_crops.extend(crop.take());
+                    if let Some(v) = viewer.as_mut() {
+                        v.toast(format!("Saved as {name}"));
+                    }
+                    sched.request_redraw();
+                }
+                crop_screen::Action::None => {}
+                _ => {}
+            }
+        }
         if input.back {
             sched.request_redraw();
-            if let Some(v) = viewer.as_mut() {
+            if let Some(c) = crop.as_mut() {
+                if !c.back() {
+                    closed_crops.extend(crop.take());
+                }
+            } else if let Some(v) = viewer.as_mut() {
                 if !v.back() {
                     closed.extend(viewer.take());
                     if std::mem::take(&mut outside) {
@@ -383,6 +432,9 @@ fn android_main(app: AndroidApp) {
         if holo_platform::update::take_changed() {
             sched.request_redraw();
         }
+        if crop.as_ref().is_some_and(|c| c.wants_frames()) {
+            sched.request_redraw();
+        }
         if thumbs.has_ready() || jobs.has_done() || video::frame_waiting() || actions::has_done() {
             sched.request_redraw();
         }
@@ -434,7 +486,10 @@ fn android_main(app: AndroidApp) {
                 for v in closed.drain(..) {
                     v.free(g.gl());
                 }
-                if viewer.is_none() {
+                for c in closed_crops.drain(..) {
+                    c.free(g.gl());
+                }
+                if viewer.is_none() && crop.is_none() {
                     batch.rect(Rect::new(0.0, 0.0, w, h), Rgba::hex(BLACK), 0.0);
                 }
                 photos.set_density(d);
@@ -478,7 +533,10 @@ fn android_main(app: AndroidApp) {
                         closed.extend(viewer.take());
                     }
                 }
-                let (anim, missing) = if let Some(v) = viewer.as_mut() {
+                let (anim, missing) = if let Some(c) = crop.as_mut() {
+                    c.draw_picture(g.gl(), &jobs, frame, screen, now);
+                    (c.draw(g.gl(), r, &mut batch, frame, now), Vec::new())
+                } else if let Some(v) = viewer.as_mut() {
                     let pd = photo_draw.get_or_insert_with(|| photo_tex::PhotoDraw::new(g.gl()));
                     (v.draw(g.gl(), r, &mut batch, pd, &thumbs, &jobs, frame, now), Vec::new())
                 } else if let Some(st) = settings.as_mut() {
@@ -495,7 +553,7 @@ fn android_main(app: AndroidApp) {
                 } };
                 thumbs.request(&missing);
                 moving = anim;
-                r.draw_layer(g.gl(), &batch, screen, viewer.is_none());
+                r.draw_layer(g.gl(), &batch, screen, viewer.is_none() && crop.is_none());
                 if t0.elapsed() > SLOW {
                     log::info!("slow frame: {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
                 }
