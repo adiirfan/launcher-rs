@@ -26,7 +26,7 @@
             android:stateNotNeeded="true"
             android:clearTaskOnLaunch="true"
             android:resizeableActivity="true"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboardHidden|keyboard|navigation|uiMode"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboardHidden|keyboard|navigation|uiMode|fontScale|fontWeightAdjustment|locale|layoutDirection|colorMode|touchscreen|mcc|mnc"
             android:windowSoftInputMode="adjustNothing|stateAlwaysHidden">
             <meta-data android:name="android.app.lib_name" android:value="launcher" />
             <intent-filter>

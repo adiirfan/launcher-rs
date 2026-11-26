@@ -1110,7 +1110,11 @@ impl Home {
         let d = self.density;
         let size = m.icon.round() as u32;
         let m_icon = size as f32;
-        icons.set_size(size);
+        // Every icon is cut at this size; a squeezed layout must never
+        // shrink it to nothing and throw them all away.
+        if size as f32 >= 24.0 * d {
+            icons.set_size(size);
+        }
         let white = Rgba::hex(WHITE);
         let accent = Rgba::hex(holo::accent());
 

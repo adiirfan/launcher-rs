@@ -20,6 +20,7 @@ mod settings_screen;
 mod refresh;
 mod keyboard;
 mod listener;
+mod lookup;
 mod system;
 mod vsync;
 
@@ -67,6 +68,7 @@ fn android_main(app: AndroidApp) {
     log::info!("android_main start, {:.0} ms after process start", ms_since_process_start());
     return_freed_memory_quickly();
     keyboard::init(&app);
+    lookup::start(&app);
 
     let mut sched = FrameScheduler::new();
     let mut gfx: Option<GlSurface> = None;
@@ -483,7 +485,12 @@ fn insets(app: &AndroidApp, (w, h): (i32, i32), last: &mut Option<Insets>) -> In
     let r = app.content_rect();
     let fallback = Insets { top: 24.0 * d, bottom: 48.0 * d, left: 0.0, right: 0.0 };
     if let Some([top, bottom, left, right]) = keyboard::bar_insets() {
-        let ins = Insets { top: top as f32, bottom: bottom as f32, left: left as f32, right: right as f32 };
+        let mut ins = Insets { top: top as f32, bottom: bottom as f32, left: left as f32, right: right as f32 };
+        // A bottom this tall is the on-screen keyboard, not a bar: the
+        // layout must not shrink around it.
+        if ins.bottom > 100.0 * d {
+            ins.bottom = last.map_or(fallback.bottom, |l| l.bottom);
+        }
         *last = Some(ins);
         return ins;
     }
