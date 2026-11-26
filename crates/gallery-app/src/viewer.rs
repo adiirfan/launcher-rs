@@ -28,7 +28,7 @@ use crate::photos::Frame;
 use crate::thumbs::{self, Thumbs};
 use crate::video::{self, VideoDraw};
 use crate::viewer_jobs::{Done, Job, Jobs};
-use crate::widgets;
+use crate::widgets::{self, MenuRow};
 
 const BOTTOM_DP: f32 = 64.0;
 /// The video's time and seek bar, above the bottom bar.
@@ -54,6 +54,37 @@ pub enum Action {
     Share(i64),
     Delete(i64),
     Favourite(i64),
+    /// Open an editor on this item.
+    Edit(i64, EditKind),
+}
+
+/// What EDIT can do with an item.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum EditKind {
+    Crop,
+    Clip,
+    MakeGif,
+    GifToVideo,
+}
+
+impl EditKind {
+    fn label(self) -> &'static str {
+        match self {
+            EditKind::Crop => "Crop and rotate",
+            EditKind::Clip => "Clip video",
+            EditKind::MakeGif => "Make a GIF",
+            EditKind::GifToVideo => "Save as video",
+        }
+    }
+
+    /// The choices EDIT offers for a kind of item.
+    pub fn for_kind(kind: Kind) -> &'static [EditKind] {
+        match kind {
+            Kind::Image => &[EditKind::Crop],
+            Kind::Video => &[EditKind::Clip, EditKind::MakeGif],
+            Kind::Gif => &[EditKind::GifToVideo],
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -156,7 +187,9 @@ pub struct Viewer {
     details: Option<(i64, [String; 5])>,
     bars: bool,
     info: bool,
-    toast: Option<(Instant, &'static str)>,
+    toast: Option<(Instant, String)>,
+    /// EDIT's menu is open (for videos and GIFs), with the row pressed.
+    edit_menu: Option<Option<usize>>,
     mode: Mode,
     app: AndroidApp,
     video: Option<Video>,
@@ -193,6 +226,7 @@ impl Viewer {
             bars: true,
             info: false,
             toast: None,
+            edit_menu: None,
             mode: Mode::Idle,
             app: app.clone(),
             video: None,
@@ -233,7 +267,30 @@ impl Viewer {
 
     /// Back: close INFO first. Returns whether it did something.
     pub fn back(&mut self) -> bool {
-        std::mem::take(&mut self.info)
+        self.edit_menu.take().is_some() || std::mem::take(&mut self.info)
+    }
+
+    /// A short message over the bottom bar ("Saved as …").
+    pub fn toast(&mut self, msg: String) {
+        self.toast = Some((Instant::now(), msg));
+    }
+
+    /// EDIT's menu: left, top, width; it sits above the EDIT button.
+    fn edit_menu_rect(&self, f: &Frame, rows: usize) -> (f32, f32, f32) {
+        let d = self.d;
+        let w = 220.0 * d;
+        let h = rows as f32 * widgets::MENU_ROW_DP * d + 8.0 * d;
+        let x = (f.ins.left + (f.w - f.ins.left - f.ins.right) / 4.0).min(f.w - w - 8.0 * d);
+        (x, self.bottom_y(f) - h - 4.0 * d, w)
+    }
+
+    fn edit_menu_row(&self, x: f32, y: f32) -> Option<usize> {
+        let f = self.last?;
+        let n = self.item(self.pager.page()).map_or(0, |it| EditKind::for_kind(it.kind).len());
+        let (mx, my, w) = self.edit_menu_rect(&f, n);
+        let row = widgets::MENU_ROW_DP * self.d;
+        let i = ((y - my - 4.0 * self.d) / row).floor();
+        (x >= mx && x < mx + w && i >= 0.0 && (i as usize) < n).then_some(i as usize)
     }
 
     /// Free the graphics memory; call before dropping the viewer.
@@ -283,7 +340,7 @@ impl Viewer {
                 }
                 video::Event::Completed | video::Event::Paused => v.playing = false,
                 video::Event::Error => {
-                    self.toast = Some((Instant::now(), "Can't play this video"));
+                    self.toast = Some((Instant::now(), "Can't play this video".into()));
                     self.close_video(gl);
                     return;
                 }
@@ -500,7 +557,7 @@ impl Viewer {
                 self.info = false;
             }
         }
-        moving |= self.pending_tap.is_some() || self.toast.is_some_and(|t| now < t.0 + TOAST_FOR);
+        moving |= self.pending_tap.is_some() || self.toast.as_ref().is_some_and(|t| now < t.0 + TOAST_FOR);
         moving |= self.open_video.is_some() || self.video.as_ref().is_some_and(|v| v.playing && v.tm.is_none());
         // Keep drawing until the zoomed picture has been still long enough
         // to ask for full detail.
@@ -647,7 +704,6 @@ impl Viewer {
             }
             let c = match b {
                 Button::Info if self.info => accent,
-                Button::Edit => Rgba::hex(0x6E6E6E),
                 _ => white,
             };
             let (ix, iy, s) = (rc.x + rc.w / 2.0 - 11.0 * d, rc.y + 12.0 * d, 22.0 * d);
@@ -665,8 +721,15 @@ impl Viewer {
         if self.info {
             self.draw_info(gl, r, batch, f, it, above);
         }
-        if let Some((t, msg)) = self.toast.filter(|t| now < t.0 + TOAST_FOR) {
-            let _ = t;
+        if let Some(choices) = self.item(self.pager.page()).map(|it| EditKind::for_kind(it.kind))
+            && let Some(pressed) = self.edit_menu
+        {
+            let (x, y, w) = self.edit_menu_rect(f, choices.len());
+            let rows: Vec<MenuRow> = choices.iter().map(|k| MenuRow::Plain(k.label())).collect();
+            widgets::popup(gl, r, batch, x, y, w, &rows, pressed, d);
+        }
+        if let Some((_, msg)) = self.toast.as_ref().filter(|t| now < t.0 + TOAST_FOR) {
+            let msg = msg.as_str();
             let by = above;
             let em = 14.0 * d;
             let mw = r.measure(msg, em, f.w, Weight::Regular);
@@ -805,6 +868,26 @@ impl Viewer {
 
     pub fn touch(&mut self, t: Touch) -> Action {
         let d = self.d;
+        // EDIT's menu takes every touch while open.
+        if let Some(pressed) = self.edit_menu {
+            let row = self.edit_menu_row(t.x, t.y);
+            match t.kind {
+                TouchKind::Down => self.edit_menu = Some(row),
+                TouchKind::Move => {
+                    if row != pressed {
+                        self.edit_menu = Some(None);
+                    }
+                }
+                TouchKind::Up => {
+                    self.edit_menu = None;
+                    if let (Some(i), Some(it)) = (pressed.filter(|p| Some(*p) == row), self.item(self.pager.page())) {
+                        return Action::Edit(it.id, EditKind::for_kind(it.kind)[i]);
+                    }
+                }
+                _ => {}
+            }
+            return Action::None;
+        }
         match t.kind {
             TouchKind::Down => {
                 self.press = self.button_at(t.x, t.y);
@@ -958,8 +1041,15 @@ impl Viewer {
                 Action::None
             }
             Button::Edit => {
-                self.toast = Some((t, "Coming in a later version"));
-                Action::None
+                let _ = t;
+                let kind = self.item(self.pager.page()).map_or(Kind::Image, |i| i.kind);
+                match EditKind::for_kind(kind) {
+                    [only] => Action::Edit(id, *only),
+                    _ => {
+                        self.edit_menu = Some(None);
+                        Action::None
+                    }
+                }
             }
             Button::Play => {
                 match self.video.as_mut().filter(|v| v.id == id) {

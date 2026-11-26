@@ -189,6 +189,10 @@ fn android_main(app: AndroidApp) {
                             trash(&app, system_bin, &[(id, it.kind == gallery_core::media::Kind::Video)]);
                         }
                     }
+                    viewer::Action::Edit(id, kind) => {
+                        log::info!("edit {kind:?}");
+                        let _ = id;
+                    }
                     viewer::Action::Favourite(id) => {
                         if let Some(it) = item(id) {
                             if system_bin {

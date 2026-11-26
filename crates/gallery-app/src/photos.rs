@@ -356,6 +356,9 @@ impl Photos {
                                 }
                                 widgets::checkbox(batch, rect.x + rect.w - 30.0 * d, rect.y + 4.0 * d, 26.0 * d, on);
                             }
+                            if gallery_core::copies::is_edited_name(&item.name) {
+                                widgets::edited_corner(batch, rect.x, rect.y, 14.0 * d);
+                            }
                             match item.kind {
                                 Kind::Video => widgets::badge(gl, r, batch, rect.x + rect.w, rect.y + rect.h, &format::duration(item.duration_ms), true, d),
                                 Kind::Gif => widgets::badge(gl, r, batch, rect.x + rect.w, rect.y + rect.h, "GIF", false, d),

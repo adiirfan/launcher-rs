@@ -64,6 +64,15 @@ pub fn spinner(gl: &Context, r: &mut Renderer, batch: &mut Batch, right: f32, cy
     x - 8.0 * d
 }
 
+/// A small accent triangle in a tile's top-left corner: an edited copy.
+pub fn edited_corner(batch: &mut Batch, x: f32, y: f32, size: f32) {
+    let n = 10;
+    for i in 0..n {
+        let f = 1.0 - i as f32 / n as f32;
+        batch.rect(Rect::new(x, y + size * i as f32 / n as f32, size * f, size / n as f32 + 0.5), accent(), 0.0);
+    }
+}
+
 /// Three dots, centred on `cx, cy`.
 pub fn overflow(batch: &mut Batch, cx: f32, cy: f32, d: f32) {
     for k in [-7.0, 0.0, 7.0] {
