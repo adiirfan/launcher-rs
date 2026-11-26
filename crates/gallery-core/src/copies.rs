@@ -19,6 +19,19 @@ pub fn copy_name(original: &str, suffix: &str, ext: &str, taken: &dyn Fn(&str) -
         .expect("some number is free")
 }
 
+/// `IMG_1.jpg` as it is, or `IMG_1_2.jpg` and so on when `taken` says
+/// the name is in use (moving into a folder that has one already).
+pub fn free_name(name: &str, taken: &dyn Fn(&str) -> bool) -> String {
+    if !taken(name) {
+        return name.to_string();
+    }
+    let (base, ext) = match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    };
+    (2..).map(|n| format!("{base}_{n}{ext}")).find(|n| !taken(n)).expect("some number is free")
+}
+
 const SUFFIXES: [&str; 5] = ["_crop", "_clip", "_gif", "_video", "_conv"];
 
 /// `IMG_1_crop_2` → `IMG_1`; anything else unchanged.
@@ -78,6 +91,16 @@ mod tests {
         let first = |n: &str| n == "IMG_1_crop.jpg";
         assert_eq!(copy_name("IMG_1_crop.jpg", "_crop", "jpg", &first), "IMG_1_crop_2.jpg");
         assert_eq!(copy_name("IMG_1_crop_2.jpg", "_conv", "png", &none), "IMG_1_conv.png");
+    }
+
+    #[test]
+    fn free_name_keeps_name_unless_taken() {
+        let none = |_: &str| false;
+        assert_eq!(free_name("IMG_1.jpg", &none), "IMG_1.jpg");
+        let used = |n: &str| n == "IMG_1.jpg" || n == "IMG_1_2.jpg";
+        assert_eq!(free_name("IMG_1.jpg", &used), "IMG_1_3.jpg");
+        let bare = |n: &str| n == "noext";
+        assert_eq!(free_name("noext", &bare), "noext_2");
     }
 
     #[test]

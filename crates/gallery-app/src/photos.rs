@@ -50,8 +50,12 @@ pub enum Action {
     AskAccess,
     /// Share or delete what's chosen (`chosen()`).
     Share,
+    Move,
     Delete,
 }
+
+/// The selection's bottom buttons, left to right.
+const SEL_BUTTONS: [(Press, &str); 3] = [(Press::SelShare, "SHARE"), (Press::SelMove, "MOVE"), (Press::SelDelete, "DELETE")];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Menu {
@@ -71,6 +75,7 @@ enum Press {
     SelDone,
     SelAll,
     SelShare,
+    SelMove,
     SelDelete,
 }
 
@@ -509,13 +514,13 @@ impl Photos {
         let aw = r.measure_spaced("ALL", em, 0.6 * d, Weight::Medium);
         r.text_spaced(gl, batch, "ALL", f.w - 16.0 * d - aw, widgets::baseline(r, cy, em, d), em, 0.6 * d, aw + 1.0, white, Weight::Medium);
 
-        // Bottom: SHARE and DELETE (MOVE and CONVERT come in later versions).
+        // Bottom: one button per action.
         let by = self.bottom(f);
         batch.rect(Rect::new(0.0, by, f.w, f.h - by), Rgba::hex(holo::BAR), 0.0);
         batch.rect(Rect::new(0.0, by, f.w, 1.0 * d), Rgba::hex(holo::DIVIDER), 0.0);
-        let half = f.w / 2.0;
+        let half = f.w / SEL_BUTTONS.len() as f32;
         let dim = if n == 0 { Rgba::hex(0x6E6E6E) } else { white };
-        for (i, (p, label)) in [(Press::SelShare, "SHARE"), (Press::SelDelete, "DELETE")].into_iter().enumerate() {
+        for (i, (p, label)) in SEL_BUTTONS.into_iter().enumerate() {
             let x = half * i as f32;
             if pressed(p) {
                 batch.rect(Rect::new(x, by, half, SEL_BOTTOM_DP * d), accent.with_alpha(0.3), 0.0);
@@ -591,7 +596,8 @@ impl Photos {
                 return None;
             }
             if y >= self.bottom(f) && y < f.h - f.ins.bottom {
-                return Some(if x < f.w / 2.0 { Press::SelShare } else { Press::SelDelete });
+                let i = ((x / f.w * SEL_BUTTONS.len() as f32) as usize).min(SEL_BUTTONS.len() - 1);
+                return Some(SEL_BUTTONS[i].0);
             }
             return None;
         }
@@ -783,8 +789,9 @@ impl Photos {
                 Action::None
             }
             Press::SelShare if self.selection.count() > 0 => Action::Share,
+            Press::SelMove if self.selection.count() > 0 => Action::Move,
             Press::SelDelete if self.selection.count() > 0 => Action::Delete,
-            Press::SelShare | Press::SelDelete => Action::None,
+            Press::SelShare | Press::SelMove | Press::SelDelete => Action::None,
             Press::MenuRow(i) => match self.menu {
                 Menu::Sort => {
                     match self.sort_rows().get(i).and_then(|r| r.1) {

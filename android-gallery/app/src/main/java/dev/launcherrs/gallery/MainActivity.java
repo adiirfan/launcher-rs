@@ -238,6 +238,7 @@ public class MainActivity extends NativeActivity {
     public void mediaRequest(int kind, long[] ids, boolean[] video, boolean on) {
         MediaActions.request(this, kind, ids, video, on);
     }
+    public boolean moveOne(long id, boolean video, String rel, String name) { return MediaActions.moveOne(this, id, video, rel, name); }
     public String trashLegacy(long[] ids, boolean[] video) { return MediaActions.trashLegacy(this, ids, video); }
     public boolean restoreLegacy(String stored, String original) { return MediaActions.restoreLegacy(this, stored, original); }
     public String binDir() { return MediaActions.binDir(this).getAbsolutePath(); }
@@ -266,7 +267,7 @@ public class MainActivity extends NativeActivity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
-        if (request > 100 && request <= 104) onActionDone(request - 100, result == RESULT_OK);
+        if (request > 100 && request <= 105) onActionDone(request - 100, result == RESULT_OK);
     }
 
     static native void onActionDone(int kind, boolean ok);

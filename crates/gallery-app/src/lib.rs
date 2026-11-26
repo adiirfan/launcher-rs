@@ -13,6 +13,7 @@ mod viewer_jobs;
 mod chrome;
 mod input;
 mod library;
+mod mover;
 mod open_with;
 mod crop_save;
 mod crop_screen;
@@ -90,6 +91,11 @@ fn android_main(app: AndroidApp) {
     let mut crop: Option<crop_screen::CropScreen> = None;
     let mut closed_crops: Vec<crop_screen::CropScreen> = Vec::new();
     let mut viewer_list_stale = false;
+    // MOVE: the folder chooser and the items it's for; then the move
+    // waiting for Android's yes; then a message for the grid.
+    let mut move_pick: Option<(AlbumsScreen, Vec<gallery_core::media::MediaItem>)> = None;
+    let mut pending_move: Option<mover::Pending> = None;
+    let mut grid_toast: Option<(Instant, String)> = None;
     let mut photo_draw: Option<photo_tex::PhotoDraw> = None;
     let mut screen_w = 1080.0f32;
     let mut asked_access = false;
@@ -244,6 +250,26 @@ fn android_main(app: AndroidApp) {
                 }
                 continue;
             }
+            if let Some((picker, chosen)) = move_pick.as_mut() {
+                match picker.touch(t) {
+                    albums_screen::Action::Photos => move_pick = None,
+                    albums_screen::Action::Open(target) => {
+                        let chosen = std::mem::take(chosen);
+                        move_pick = None;
+                        photos.end_selection();
+                        if let Some(a) = album.as_mut() {
+                            a.end_selection();
+                        }
+                        match begin_move(&app, system_bin, photos.items(), chosen, &target) {
+                            Ok(Some(p)) => pending_move = Some(p),
+                            Ok(None) => {}
+                            Err(msg) => grid_toast = Some((Instant::now(), msg)),
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
             if let Some(st) = settings.as_mut() {
                 let mut s = gs.clone();
                 match st.touch(t, &mut s) {
@@ -312,6 +338,13 @@ fn android_main(app: AndroidApp) {
                     let grid = album.as_ref().unwrap_or(&photos);
                     actions::share(&app, &grid.chosen());
                 }
+                Action::Move => {
+                    let grid = album.as_ref().unwrap_or(&photos);
+                    let ids: std::collections::HashSet<i64> = grid.chosen().iter().map(|c| c.0).collect();
+                    let chosen: Vec<_> = grid.items().iter().filter(|it| ids.contains(&it.id)).cloned().collect();
+                    let title = "Move to".to_string();
+                    move_pick = Some((AlbumsScreen::picker(photos_density(&app), photos.items().clone(), title), chosen));
+                }
                 Action::Delete => {
                     let grid = album.as_mut().unwrap_or(&mut photos);
                     trash(&app, system_bin, &grid.chosen());
@@ -353,6 +386,8 @@ fn android_main(app: AndroidApp) {
                 if !c.back() {
                     closed_crops.extend(crop.take());
                 }
+            } else if move_pick.is_some() {
+                move_pick = None;
             } else if let Some(v) = viewer.as_mut() {
                 if !v.back() {
                     closed.extend(viewer.take());
@@ -384,6 +419,13 @@ fn android_main(app: AndroidApp) {
         for (op, ok) in actions::take_done() {
             log::info!("media action {op:?}: {}", if ok { "done" } else { "not done" });
             sched.request_redraw();
+            if op == actions::Op::Move {
+                match pending_move.take() {
+                    Some(p) if ok => mover::start(&app, p),
+                    _ => {}
+                }
+                continue;
+            }
             if !ok {
                 continue;
             }
@@ -397,6 +439,10 @@ fn android_main(app: AndroidApp) {
                 b.clear_selection();
                 b.set_items(bin_items(&app, system_bin));
             }
+        }
+        if let Some(msg) = mover::take_result() {
+            grid_toast = Some((Instant::now(), msg));
+            sched.request_redraw();
         }
         if let Some(fresh) = library::take_update() {
             log::info!("showing {} items", fresh.len());
@@ -539,6 +585,9 @@ fn android_main(app: AndroidApp) {
                 } else if let Some(v) = viewer.as_mut() {
                     let pd = photo_draw.get_or_insert_with(|| photo_tex::PhotoDraw::new(g.gl()));
                     (v.draw(g.gl(), r, &mut batch, pd, &thumbs, &jobs, frame, now), Vec::new())
+                } else if let Some((picker, _)) = move_pick.as_mut() {
+                    picker.set_items(photos.items().clone());
+                    picker.draw(g.gl(), r, &mut batch, &thumbs, frame, now)
                 } else if let Some(st) = settings.as_mut() {
                     st.draw(g.gl(), r, &mut batch, &thumbs, frame, &gs, manage, now)
                 } else if let Some(b) = bin.as_mut() {
@@ -553,6 +602,14 @@ fn android_main(app: AndroidApp) {
                 } };
                 thumbs.request(&missing);
                 moving = anim;
+                if viewer.is_none() && crop.is_none() && let Some((at, msg)) = grid_toast.as_ref() {
+                    if now < *at + Duration::from_millis(2500) {
+                        widgets::toast(g.gl(), r, &mut batch, msg, frame.w, frame.h - frame.ins.bottom - 64.0 * d, d);
+                        moving = true;
+                    } else {
+                        grid_toast = None;
+                    }
+                }
                 r.draw_layer(g.gl(), &batch, screen, viewer.is_none() && crop.is_none());
                 if t0.elapsed() > SLOW {
                     log::info!("slow frame: {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
@@ -640,6 +697,31 @@ enum ViewerSource {
 
 fn photos_density(app: &AndroidApp) -> f32 {
     app.config().density().unwrap_or(160) as f32 / 160.0
+}
+
+/// MOVE into `target`: items already there are left alone. Android 11+
+/// asks the owner first (answer through `take_done`), so the move waits as
+/// Ok(Some); older versions move straight away.
+fn begin_move(app: &AndroidApp, system_bin: bool, all: &[gallery_core::media::MediaItem], chosen: Vec<gallery_core::media::MediaItem>, target: &gallery_core::albums::Album) -> Result<Option<mover::Pending>, String> {
+    let gallery_core::arrange::Filter::Bucket(bucket) = target.filter else { return Ok(None) };
+    let items: Vec<_> = chosen.into_iter().filter(|it| it.bucket_id != bucket).collect();
+    if items.is_empty() {
+        return Err(format!("Already in {}", target.name));
+    }
+    let cover_video = all.iter().find(|it| it.id == target.cover).is_some_and(|it| it.kind == gallery_core::media::Kind::Video);
+    let rel = saving::rel_path(app, target.cover, cover_video);
+    if rel.is_empty() {
+        return Err("Couldn't find that folder".into());
+    }
+    let p = mover::Pending { items, rel, folder: target.name.clone() };
+    if system_bin {
+        let ids: Vec<(i64, bool)> = p.items.iter().map(|it| (it.id, it.kind == gallery_core::media::Kind::Video)).collect();
+        actions::request(app, actions::Op::Move, &ids, false);
+        Ok(Some(p))
+    } else {
+        mover::start(app, p);
+        Ok(None)
+    }
 }
 
 /// Into the Bin: Android's on 11+ (it may ask first), ours on 8-10.

@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
-use gallery_core::albums::{albums, Album};
+use gallery_core::albums::{albums, folders, Album};
 use gallery_core::format;
 use gallery_core::media::{Kind, MediaItem};
 use glow::Context;
@@ -70,6 +70,9 @@ pub struct AlbumsScreen {
     scroller: Scroller,
     press: Option<Hit>,
     last: Option<Frame>,
+    /// Choosing where to move things: this title, real folders only, no
+    /// tabs or MORE list. The bar's back arrow gives `Action::Photos`.
+    picking: Option<String>,
 }
 
 impl AlbumsScreen {
@@ -83,7 +86,16 @@ impl AlbumsScreen {
             scroller: Scroller::new(8.0 * d, d),
             press: None,
             last: None,
+            picking: None,
         }
+    }
+
+    /// The folder chooser for MOVE.
+    pub fn picker(d: f32, items: std::sync::Arc<Vec<MediaItem>>, title: String) -> AlbumsScreen {
+        let mut s = AlbumsScreen::new(d);
+        s.items = items;
+        s.picking = Some(title);
+        s
     }
 
     pub fn set_items(&mut self, items: std::sync::Arc<Vec<MediaItem>>) {
@@ -106,18 +118,19 @@ impl AlbumsScreen {
     }
 
     fn top(&self, f: &Frame) -> f32 {
-        f.ins.top + (BAR_DP + TABS_DP) * self.d
+        let tabs = if self.picking.is_some() { 0.0 } else { TABS_DP };
+        f.ins.top + (BAR_DP + tabs) * self.d
     }
 
     fn layout(&self, f: &Frame) -> Layout {
         let d = self.d;
         let inner = f.w - f.ins.left - f.ins.right - 2.0 * PAD_DP * d;
         let cell = (inner - COL_GAP_DP * d) / 2.0;
-        let grid_top = 54.0 * d;
+        let grid_top = if self.picking.is_some() { 16.0 * d } else { 54.0 * d };
         let rows = self.list.len().div_ceil(2) as f32;
         let grid_h = if rows > 0.0 { rows * (cell + CAPTION_DP * d) + (rows - 1.0) * ROW_GAP_DP * d } else { 0.0 };
         let more_top = grid_top + grid_h + 28.0 * d;
-        let height = more_top + 24.0 * d + MORE.len() as f32 * MORE_ROW_DP * d + 24.0 * d;
+        let height = if self.picking.is_some() { grid_top + grid_h + 24.0 * d } else { more_top + 24.0 * d + MORE.len() as f32 * MORE_ROW_DP * d + 24.0 * d };
         Layout { cell, grid_top, more_top, height }
     }
 
@@ -139,6 +152,9 @@ impl AlbumsScreen {
         let f = self.last?;
         let bar_bottom = f.ins.top + BAR_DP * self.d;
         let top = self.top(&f);
+        if self.picking.is_some() && y >= f.ins.top && y < bar_bottom {
+            return (x < 60.0 * self.d).then_some(Hit::PhotosTab);
+        }
         if y >= bar_bottom && y < top {
             return (x < f.w / 2.0).then_some(Hit::PhotosTab);
         }
@@ -150,6 +166,9 @@ impl AlbumsScreen {
         if let Some(i) = (0..self.list.len()).find(|&i| self.cell_rect(&f, &l, i).contains(x, cy)) {
             return Some(Hit::Album(i));
         }
+        if self.picking.is_some() {
+            return None;
+        }
         (0..MORE.len()).find(|&i| self.more_rect(&f, &l, i).contains(x, cy)).map(Hit::More)
     }
 
@@ -158,7 +177,7 @@ impl AlbumsScreen {
         let d = self.d;
         self.last = Some(f);
         if self.dirty {
-            self.list = albums(&self.items, &self.hidden);
+            self.list = if self.picking.is_some() { folders(&self.items) } else { albums(&self.items, &self.hidden) };
             self.dirty = false;
         }
         let l = self.layout(&f);
@@ -171,7 +190,9 @@ impl AlbumsScreen {
         let wide = f.w - f.ins.right - PAD_DP * d - x0;
         let mut missing = Vec::new();
 
-        widgets::heading(gl, r, batch, x0, oy + 18.0 * d, wide, "ON THIS PHONE", "", d);
+        if self.picking.is_none() {
+            widgets::heading(gl, r, batch, x0, oy + 18.0 * d, wide, "ON THIS PHONE", "", d);
+        }
         for i in 0..self.list.len() {
             let c = self.cell_rect(&f, &l, i);
             let (x, y) = (c.x, c.y + oy);
@@ -200,6 +221,11 @@ impl AlbumsScreen {
             r.text(gl, batch, &format::count(a.count as usize), x, y + l.cell + 40.0 * d, 13.0 * d, l.cell, Rgba::hex(TEXT_QUIET), Weight::Regular);
         }
 
+        if let Some(title) = &self.picking {
+            batch.rect(Rect::new(0.0, bottom, f.w, f.h - bottom), Rgba::hex(0x000000), 0.0);
+            chrome::back_bar(gl, r, batch, f.w, f.ins.top, title, self.press == Some(Hit::PhotosTab), d);
+            return (self.scroller.animating(now), missing);
+        }
         widgets::heading(gl, r, batch, x0, oy + l.more_top, wide, "MORE", "", d);
         for (i, (name, sub)) in MORE.iter().enumerate() {
             let m = self.more_rect(&f, &l, i);

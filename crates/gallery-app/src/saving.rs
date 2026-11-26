@@ -32,7 +32,7 @@ pub fn rel_path(app: &AndroidApp, id: i64, video: bool) -> String {
     .unwrap_or_default()
 }
 
-fn exists(app: &AndroidApp, rel: &str, name: &str) -> bool {
+pub fn exists(app: &AndroidApp, rel: &str, name: &str) -> bool {
     warn(
         "exists",
         with_activity(app, |env, a| {

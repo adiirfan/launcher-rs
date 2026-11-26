@@ -231,10 +231,25 @@ pub fn action_icon(batch: &mut Batch, which: &str, x: f32, y: f32, size: f32, c:
             }
             lines(batch, &[&[(8.0, 11.0), (16.0, 7.6)], &[(8.0, 13.0), (16.0, 16.4)]], x, y, u, c);
         }
+        "MOVE" => {
+            // A folder with an arrow going up into it.
+            lines(batch, &[&[(3.0, 6.0), (9.0, 6.0), (11.0, 8.0), (21.0, 8.0), (21.0, 19.0), (3.0, 19.0), (3.0, 6.0)], &[(12.0, 11.0), (12.0, 16.0)], &[(9.5, 13.5), (12.0, 11.0), (14.5, 13.5)]], x, y, u, c);
+        }
+        "CONVERT" => lines(batch, &[&[(4.0, 8.0), (17.0, 8.0)], &[(14.0, 5.0), (17.0, 8.0)], &[(20.0, 16.0), (7.0, 16.0)], &[(10.0, 19.0), (7.0, 16.0)]], x, y, u, c),
         "RESTORE" => {
             // An arrow curling back up: a box with an arrow out of its top.
             lines(batch, &[&[(5.0, 11.0), (5.0, 20.0), (19.0, 20.0), (19.0, 11.0)], &[(12.0, 16.0), (12.0, 4.0)], &[(8.0, 8.0), (12.0, 4.0), (16.0, 8.0)]], x, y, u, c);
         }
         _ => lines(batch, &[&[(5.0, 7.0), (19.0, 7.0)], &[(9.0, 7.0), (9.0, 4.0), (15.0, 4.0), (15.0, 7.0)], &[(7.0, 7.0), (8.0, 20.0), (16.0, 20.0), (17.0, 7.0)]], x, y, u, c),
     }
+}
+
+/// A short message in a dark pill, centred, its bottom `gap` above `above`.
+pub fn toast(gl: &Context, r: &mut Renderer, batch: &mut Batch, msg: &str, w: f32, above: f32, d: f32) {
+    let em = 14.0 * d;
+    let mw = r.measure(msg, em, w, Weight::Regular);
+    let (tw, h) = (mw + 40.0 * d, 40.0 * d);
+    let rc = Rect::new((w - tw) / 2.0, above - h - 24.0 * d, tw, h);
+    batch.rect(rc, Rgba::hex(0x333333).with_alpha(0.95), 4.0 * d);
+    r.text(gl, batch, msg, rc.x + 20.0 * d, baseline(r, rc.y + h / 2.0, em, d), em, mw + 1.0, Rgba::hex(WHITE), Weight::Regular);
 }

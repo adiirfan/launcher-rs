@@ -734,14 +734,7 @@ impl Viewer {
             widgets::popup(gl, r, batch, x, y, w, &rows, pressed, d);
         }
         if let Some((_, msg)) = self.toast.as_ref().filter(|t| now < t.0 + TOAST_FOR) {
-            let msg = msg.as_str();
-            let by = above;
-            let em = 14.0 * d;
-            let mw = r.measure(msg, em, f.w, Weight::Regular);
-            let (w, h) = (mw + 40.0 * d, 40.0 * d);
-            let rc = Rect::new((f.w - w) / 2.0, by - h - 24.0 * d, w, h);
-            batch.rect(rc, Rgba::hex(0x333333).with_alpha(0.95), 4.0 * d);
-            r.text(gl, batch, msg, rc.x + 20.0 * d, widgets::baseline(r, rc.y + h / 2.0, em, d), em, mw + 1.0, white, Weight::Regular);
+            widgets::toast(gl, r, batch, msg, f.w, above, d);
         }
     }
 

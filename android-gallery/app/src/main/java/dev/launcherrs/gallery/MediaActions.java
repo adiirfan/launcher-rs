@@ -3,6 +3,7 @@ package dev.launcherrs.gallery;
 import android.app.Activity;
 import android.app.PendingIntent;
 import android.content.ClipData;
+import android.content.ContentValues;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
@@ -12,6 +13,7 @@ import android.media.MediaScannerConnection;
 import android.media.ThumbnailUtils;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Environment;
 import android.provider.MediaStore;
 
 import java.io.File;
@@ -25,7 +27,7 @@ import java.util.List;
 final class MediaActions {
     private MediaActions() {}
 
-    static final int TRASH = 1, RESTORE = 2, DELETE = 3, FAVOURITE = 4;
+    static final int TRASH = 1, RESTORE = 2, DELETE = 3, FAVOURITE = 4, MOVE = 5;
 
     static ArrayList<Uri> uris(long[] ids, boolean[] video) {
         ArrayList<Uri> out = new ArrayList<>();
@@ -67,6 +69,7 @@ final class MediaActions {
                     case TRASH: pi = MediaStore.createTrashRequest(cr, list, true); break;
                     case RESTORE: pi = MediaStore.createTrashRequest(cr, list, false); break;
                     case DELETE: pi = MediaStore.createDeleteRequest(cr, list); break;
+                    case MOVE: pi = MediaStore.createWriteRequest(cr, list); break;
                     default: pi = MediaStore.createFavoriteRequest(cr, list, on);
                 }
                 a.startIntentSenderForResult(pi.getIntentSender(), 100 + kind, null, 0, 0, 0);
@@ -132,6 +135,40 @@ final class MediaActions {
             return ThumbnailUtils.createImageThumbnail(path, MediaStore.Images.Thumbnails.MINI_KIND);
         } catch (Exception | OutOfMemoryError e) {
             return null;
+        }
+    }
+
+    /** Move one item into the folder `rel` (relative to the storage root)
+     *  under `name`. Android 11+ changes its folder in the media list (after
+     *  the owner allowed it through MOVE's request); older versions move the
+     *  file itself and tell Android about both places. */
+    static boolean moveOne(Context c, long id, boolean video, String rel, String name) {
+        ContentResolver cr = c.getContentResolver();
+        Uri uri = Thumbs.uri(id, video);
+        try {
+            if (Build.VERSION.SDK_INT >= 30) {
+                ContentValues v = new ContentValues();
+                v.put(MediaStore.MediaColumns.RELATIVE_PATH, rel);
+                v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+                return cr.update(uri, v, null, null) > 0;
+            }
+            String path = pathOf(cr, uri);
+            if (path == null) return false;
+            File to = new File(new File(Environment.getExternalStorageDirectory(), rel), name);
+            File parent = to.getParentFile();
+            if (parent != null) parent.mkdirs();
+            if (to.exists() || !new File(path).renameTo(to)) return false;
+            // Point the entry at the new place so its id and favourite stay.
+            try {
+                ContentValues v = new ContentValues();
+                v.put(MediaStore.MediaColumns.DATA, to.getAbsolutePath());
+                cr.update(uri, v, null, null);
+            } catch (Exception ignored) {}
+            MediaScannerConnection.scanFile(c, new String[] {path, to.getAbsolutePath()}, null, null);
+            return true;
+        } catch (Exception e) {
+            android.util.Log.w("gallery", "move failed", e);
+            return false;
         }
     }
 

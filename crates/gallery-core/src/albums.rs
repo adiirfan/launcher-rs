@@ -69,6 +69,12 @@ pub fn albums(items: &[MediaItem], hidden: &HashSet<i64>) -> Vec<Album> {
     real
 }
 
+/// The folders something can be moved into: every real folder (hidden
+/// ones too), Camera first, then by name.
+pub fn folders(items: &[MediaItem]) -> Vec<Album> {
+    albums(items, &HashSet::new()).into_iter().filter(|a| matches!(a.filter, Filter::Bucket(_))).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,6 +125,17 @@ mod tests {
         assert_eq!((a[1].filter.clone(), a[1].count, a[1].cover), (Filter::Favourites, 1, 4));
         assert_eq!((a[2].filter.clone(), a[2].count, a[2].cover), (Filter::Videos, 1, 2));
         assert_eq!((a[3].count, a[3].cover), (1, 4));
+    }
+
+    #[test]
+    fn folders_leave_out_favourites_and_videos() {
+        let mut items = vec![item(1, 10, "Camera", 1), item(2, 20, "Download", 2), item(3, 30, "Secret", 3)];
+        items[0].favourite = true;
+        items[1].kind = Kind::Video;
+        let f = folders(&items);
+        // Only real folders a file can go into, Camera first; hidden ones too.
+        assert_eq!(names(&f), ["Camera", "Download", "Secret"]);
+        assert_eq!(f[2].filter, Filter::Bucket(30));
     }
 
     #[test]

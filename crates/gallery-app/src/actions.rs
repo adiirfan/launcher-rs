@@ -19,6 +19,8 @@ pub enum Op {
     Restore = 2,
     Delete = 3,
     Favourite = 4,
+    /// Android 11+: the owner allowed changing these files (for MOVE).
+    Move = 5,
 }
 
 static DONE: Mutex<VecDeque<(i32, bool)>> = Mutex::new(VecDeque::new());
@@ -40,6 +42,7 @@ pub fn take_done() -> Vec<(Op, bool)> {
                 2 => Op::Restore,
                 3 => Op::Delete,
                 4 => Op::Favourite,
+                5 => Op::Move,
                 _ => return None,
             };
             Some((op, ok))
@@ -108,6 +111,18 @@ fn string_result(env: &mut Env, obj: JObject) -> jni::errors::Result<String> {
     }
     let s = env.cast_local::<JString>(obj)?;
     Ok(s.mutf8_chars(env)?.into())
+}
+
+/// Move one item into folder `rel` as `name`.
+pub fn move_one(app: &AndroidApp, id: i64, video: bool, rel: &str, name: &str) -> bool {
+    logged(
+        "moveOne",
+        with_activity(app, |env, a| {
+            let (r, n) = (env.new_string(rel)?, env.new_string(name)?);
+            let args = [JValue::Long(id), JValue::Bool(video), JValue::Object(&r), JValue::Object(&n)];
+            env.call_method(a, jni_str!("moveOne"), jni_sig!("(JZLjava/lang/String;Ljava/lang/String;)Z"), &args)?.z()
+        }),
+    )
 }
 
 /// Our own bin's folder (Android 8-10).
