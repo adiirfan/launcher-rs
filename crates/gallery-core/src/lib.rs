@@ -6,3 +6,4 @@ pub mod arrange;
 pub mod dates;
 pub mod grid;
 pub mod thumbq;
+pub mod format;

@@ -114,12 +114,15 @@ fn run() {
         drop(WORK.wait(s).unwrap());
     };
     let t = Instant::now();
+    // The last list handed over, byte for byte: an identical one isn't sent again.
+    let mut last: Vec<u8> = Vec::new();
     if let Ok(bytes) = std::fs::read(snapshot_path(&dir))
         && let Ok(items) = parse_records(&bytes)
     {
         log::info!("library: snapshot {} items in {:.0} ms", items.len(), t.elapsed().as_secs_f64() * 1e3);
         SHARED.lock().unwrap().fresh = Some(Arc::new(items));
         waker::wake();
+        last = bytes;
     }
     loop {
         let app = {
@@ -139,11 +142,13 @@ fn run() {
             env.convert_byte_array(&array)
         });
         match bytes.map(|b| (parse_records(&b), b)) {
+            Ok((Ok(_), raw)) if raw == last => log::debug!("library: unchanged"),
             Ok((Ok(items), raw)) => {
                 log::info!("library: {} items in {:.0} ms", items.len(), t.elapsed().as_secs_f64() * 1e3);
                 SHARED.lock().unwrap().fresh = Some(Arc::new(items));
                 waker::wake();
                 save(&dir, &raw);
+                last = raw;
             }
             Ok((Err(e), _)) => log::warn!("library: unreadable list {e:?}"),
             Err(e) => log::warn!("library: query failed {e}"),

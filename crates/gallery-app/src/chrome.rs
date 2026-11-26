@@ -36,3 +36,25 @@ pub fn picture_glyph(batch: &mut Batch, x: f32, y: f32, size: f32, c: Rgba) {
     holo::stroke(batch, (x + 16.0 * u, y + 12.0 * u), (x + 20.0 * u, y + 16.0 * u), lw, c);
     batch.circle(x + 15.5 * u, y + 8.5 * u, 1.3 * u, c);
 }
+
+/// An inner screen's bar: Holo's small back chevron, the app square and a
+/// title. The chevron and square together are the back button.
+pub fn back_bar(gl: &Context, r: &mut Renderer, batch: &mut Batch, w: f32, top: f32, title: &str, pressed: bool, d: f32) -> f32 {
+    let h = BAR_DP * d;
+    batch.rect(Rect::new(0.0, 0.0, w, top + h), Rgba::hex(BAR), 0.0);
+    if pressed {
+        batch.rect(Rect::new(0.0, top, 60.0 * d, h), Rgba::hex(holo::accent()).with_alpha(0.3), 0.0);
+    }
+    let cy = top + h / 2.0;
+    let lw = 2.0 * d;
+    let c = Rgba::hex(WHITE);
+    holo::stroke(batch, (12.0 * d, cy), (17.0 * d, cy - 6.0 * d), lw, c);
+    holo::stroke(batch, (12.0 * d, cy), (17.0 * d, cy + 6.0 * d), lw, c);
+    let s = 32.0 * d;
+    let (sx, sy) = (22.0 * d, cy - s / 2.0);
+    batch.rect(Rect::new(sx, sy, s, s), Rgba::hex(holo::accent()), 4.0 * d);
+    picture_glyph(batch, sx + 6.0 * d, sy + 6.0 * d, 20.0 * d, Rgba::hex(BLACK));
+    let em = 20.0 * d;
+    r.text(gl, batch, title, sx + s + 10.0 * d, cy + r.ascent(em) / 2.0 - 1.0 * d, em, w - 230.0 * d, Rgba::hex(WHITE), Weight::Regular);
+    top + h
+}

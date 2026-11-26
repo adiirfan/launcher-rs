@@ -101,6 +101,13 @@ impl Scroller {
         self.pos = self.pos.clamp(0.0, self.max);
     }
 
+    /// Show `pos` at once (kept in bounds), stopping any fling or drag.
+    pub fn jump_to(&mut self, pos: f32) {
+        self.pos = self.clamp(pos);
+        self.drag = None;
+        self.fling = None;
+    }
+
     pub fn reset(&mut self) {
         self.pos = 0.0;
         self.drag = None;
@@ -249,6 +256,24 @@ mod tests {
         let mut s = Scroller::new(24.0, 3.0);
         s.set_bounds(1000.0);
         s
+    }
+
+    #[test]
+    fn jump_to_moves_and_stops_a_fling() {
+        let t0 = Instant::now();
+        let mut s = Scroller::new(24.0, 3.0);
+        s.set_bounds(5000.0);
+        s.touch_down(500.0, 1500.0, t0);
+        for k in 1..=10 {
+            s.touch_move(500.0, 1500.0 - 60.0 * k as f32, t0 + Duration::from_millis(8 * k));
+        }
+        s.touch_up(500.0, 900.0, t0 + Duration::from_millis(88));
+        assert!(s.animating(t0 + Duration::from_millis(100)));
+        s.jump_to(1234.0);
+        assert!(!s.animating(t0 + Duration::from_millis(100)));
+        assert_eq!(s.offset(t0 + Duration::from_millis(100)), 1234.0);
+        s.jump_to(9999.0);
+        assert_eq!(s.offset(t0), 5000.0);
     }
 
     #[test]

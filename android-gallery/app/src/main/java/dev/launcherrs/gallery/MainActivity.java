@@ -46,6 +46,12 @@ public class MainActivity extends NativeActivity {
         super.onStart();
         observer = new ContentObserver(new Handler(Looper.getMainLooper())) {
             @Override public void onChange(boolean selfChange) { onLibraryChanged(); }
+            // Android files away the thumbnails we ask for and announces each
+            // one; those are not changes to the library.
+            @Override public void onChange(boolean selfChange, Uri uri) {
+                if (uri != null && uri.getPath() != null && uri.getPath().contains("thumbnails")) return;
+                onLibraryChanged();
+            }
         };
         // The whole media store: Android 9 announces new pictures under
         // images/, not file/, so listening on the file list alone misses them.

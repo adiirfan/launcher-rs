@@ -94,6 +94,11 @@ impl Thumbs {
         }
     }
 
+    /// Finished thumbnails are waiting to go into the renderer.
+    pub fn has_ready(&self) -> bool {
+        !self.shared.0.lock().unwrap().ready.is_empty()
+    }
+
     /// Let the graphics driver finish the uploads, so it can reuse its
     /// copies instead of keeping a pile of them (the launcher's Adreno trap).
     pub fn settle(gl: &glow::Context) {

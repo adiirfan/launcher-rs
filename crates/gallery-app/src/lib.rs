@@ -5,12 +5,16 @@ mod bars;
 mod chrome;
 mod input;
 mod library;
+mod photos;
 mod system;
 mod thumbs;
+mod widgets;
 
 use std::time::{Duration, Instant};
 
 use android_activity::{AndroidApp, MainEvent, PollEvent};
+use gallery_core::access::Access;
+use gallery_core::arrange::Filter;
 use holo_platform::gl_surface::GlSurface;
 use holo_platform::holo::BLACK;
 use holo_platform::refresh::FrameRate;
@@ -22,6 +26,8 @@ use launcher_core::frame::FrameScheduler;
 use launcher_core::refresh::{RateVote, RefreshPolicy};
 use launcher_draw::batch::Batch;
 use launcher_draw::{Rect, Rgba};
+use photos::{Action, Photos};
+use thumbs::Thumbs;
 
 /// Work longer than this risks missing the screen's next refresh.
 const SLOW: Duration = Duration::from_millis(8);
@@ -39,7 +45,9 @@ fn android_main(app: AndroidApp) {
     waker::init(&app);
     let data_dir = app.internal_data_path().unwrap_or_else(|| std::path::PathBuf::from("/data/local/tmp"));
     library::start(&app, data_dir);
-    let mut items: std::sync::Arc<Vec<gallery_core::media::MediaItem>> = Default::default();
+    let thumbs = Thumbs::new(&app);
+    let d0 = app.config().density().unwrap_or(160) as f32 / 160.0;
+    let mut photos = Photos::new(d0, Filter::All, None);
     let mut asked_access = false;
 
     let mut sched = FrameScheduler::new();
@@ -103,15 +111,32 @@ fn android_main(app: AndroidApp) {
             policy.note_activity(Instant::now());
             sched.request_redraw();
         }
-        if input.back {
+        for t in input.touches {
+            match photos.touch(t, library::access()) {
+                Action::None => {}
+                Action::AskAccess => {
+                    if library::can_ask(&app) {
+                        library::request_access(&app);
+                    } else {
+                        library::open_settings(&app);
+                    }
+                }
+                other => log::info!("not built yet: {other:?}"),
+            }
+        }
+        if input.back && !photos.back() {
             system::finish(&app);
         }
         if let Some(fresh) = library::take_update() {
-            items = fresh;
-            log::info!("showing {} items", items.len());
+            log::info!("showing {} items", fresh.len());
+            photos.set_items(fresh);
+            thumbs.clear_failures();
             sched.request_redraw();
         }
         if library::take_asked() {
+            sched.request_redraw();
+        }
+        if thumbs.has_ready() {
             sched.request_redraw();
         }
 
@@ -137,7 +162,7 @@ fn android_main(app: AndroidApp) {
                     frame_rate.apply(&w, vote);
                 }
             }
-            let moving = false;
+            let mut moving = false;
             let mut again = false;
             if let Some(g) = gfx.as_ref().filter(|g| g.has_surface()) {
                 let r = renderer.get_or_insert_with(|| {
@@ -152,8 +177,19 @@ fn android_main(app: AndroidApp) {
                 let d = app.config().density().unwrap_or(160) as f32 / 160.0;
                 let ins = bars::insets(d);
                 let (w, h) = (screen.0 as f32, screen.1 as f32);
+                // New thumbnails go in before drawing, a slice of the frame at most.
+                let had_ready = thumbs.has_ready();
+                let more = thumbs.upload(g.gl(), r, Duration::from_nanos(frame_rate.period_ns() as u64 / 5));
+                if had_ready && !more {
+                    Thumbs::settle(g.gl());
+                }
                 batch.rect(Rect::new(0.0, 0.0, w, h), Rgba::hex(BLACK), 0.0);
-                chrome::action_bar(g.gl(), r, &mut batch, w, ins.top, "Gallery", d);
+                photos.set_density(d);
+                let (today, utc_offset_s) = system::local_today();
+                let frame = photos::Frame { w, h, ins, today, utc_offset_s };
+                let (anim, missing) = photos.draw(g.gl(), r, &mut batch, &thumbs, frame, library::access(), now);
+                thumbs.request(&missing);
+                moving = anim;
                 r.draw(g.gl(), &batch, screen);
                 if t0.elapsed() > SLOW {
                     log::info!("slow frame: {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
@@ -170,11 +206,12 @@ fn android_main(app: AndroidApp) {
                     log::info!("first frame: {:.0} ms after process start", sys::ms_since_process_start());
                     sys::purge_freed_memory();
                 }
-                again = r.wants_redraw();
+                again = r.wants_redraw() || more;
             }
             if moving {
                 sched.animate_until(now + ANIM_STEP);
             }
+
             sched.frame_drawn(now);
             if again {
                 sched.request_redraw();
@@ -182,7 +219,7 @@ fn android_main(app: AndroidApp) {
         }
 
         // First run: ask for the library once the first frame is up.
-        if !first_frame && !asked_access && library::access_known() && library::access() == gallery_core::access::Access::None {
+        if !first_frame && !asked_access && library::access_known() && library::access() == Access::None {
             asked_access = true;
             library::request_access(&app);
         }
