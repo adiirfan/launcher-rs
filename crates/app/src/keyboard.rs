@@ -3,6 +3,8 @@
 
 use std::sync::{Mutex, OnceLock};
 
+use std::time::{Duration, Instant};
+
 use android_activity::{AndroidApp, AndroidAppWaker};
 use jni::objects::{JClass, JString, JValue};
 use jni::sys::jint;
@@ -11,7 +13,8 @@ use launcher_core::ime::ImeState;
 
 use crate::jni_util::with_activity;
 
-static LATEST: Mutex<Option<ImeState>> = Mutex::new(None);
+/// The newest text from the keyboard, and when it came.
+static LATEST: Mutex<Option<(ImeState, Instant)>> = Mutex::new(None);
 static ACTION: Mutex<bool> = Mutex::new(false);
 static HOME: Mutex<bool> = Mutex::new(false);
 static PERMISSION: Mutex<Option<(i32, bool)>> = Mutex::new(None);
@@ -85,7 +88,12 @@ pub fn take_permission() -> Option<(i32, bool)> {
 
 /// The newest text state since the last call.
 pub fn take() -> Option<ImeState> {
-    LATEST.lock().unwrap().take()
+    let (state, came) = LATEST.lock().unwrap().take()?;
+    let waited = came.elapsed();
+    if waited > Duration::from_millis(100) {
+        log::info!("slow text: waited {:.0} ms to be shown", waited.as_secs_f64() * 1e3);
+    }
+    Some(state)
 }
 
 /// Whether Enter / Search was pressed since the last call.
@@ -112,7 +120,7 @@ pub extern "system" fn Java_dev_launcherrs_app_MainActivity_onText<'l>(
     let outcome = unowned_env.with_env(|env| -> jni::errors::Result<()> {
         let text: String = text.mutf8_chars(env)?.into();
         let state = ImeState::from_java(&text, sel_start, sel_end, comp_start, comp_end);
-        *LATEST.lock().unwrap() = Some(state);
+        *LATEST.lock().unwrap() = Some((state, Instant::now()));
         Ok(())
     });
     outcome.resolve::<jni::errors::LogErrorAndDefault>();

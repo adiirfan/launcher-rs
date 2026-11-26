@@ -294,6 +294,9 @@ fn android_main(app: AndroidApp) {
             || tick.is_some()
             || waiting_since.is_some_and(|t| now.duration_since(t) >= VSYNC_FALLBACK);
         if sched.should_draw(now) && on_beat {
+            if let Some(w) = waiting_since.map(|t| now.duration_since(t)).filter(|w| *w > Duration::from_millis(250)) {
+                log::info!("slow wait: wanted a frame for {:.0} ms", w.as_secs_f64() * 1e3);
+            }
             waiting_since = None;
             // Set when this frame left something for the next one.
             let mut again = false;
@@ -343,8 +346,12 @@ fn android_main(app: AndroidApp) {
                         ms(built), icons.decoded, ms(icons.spent), ms(r.spent_glyphs), ms(r.spent_fonts), ms(submitted - built)
                     );
                 }
+                let swap_t = Instant::now();
                 if let Err(e) = g.swap() {
                     log::error!("swap failed: {e}");
+                }
+                if swap_t.elapsed() > Duration::from_millis(100) {
+                    log::info!("slow swap: {:.0} ms handing the frame to the screen", swap_t.elapsed().as_secs_f64() * 1e3);
                 }
                 // Something kept moving, yet a refresh went by with no frame.
                 if let (Some(t), Some(prev)) = (tick, moving_tick)
