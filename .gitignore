@@ -6,8 +6,3 @@ android/app/src/main/jniLibs/
 android/local.properties
 docs/
 .superpowers/
-android-gallery/.gradle/
-android-gallery/**/build/
-android-gallery/build/
-android-gallery/app/src/main/jniLibs/
-android-gallery/local.properties
