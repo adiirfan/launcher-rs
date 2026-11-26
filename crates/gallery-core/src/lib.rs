@@ -8,3 +8,5 @@ pub mod grid;
 pub mod thumbq;
 pub mod format;
 pub mod albums;
+pub mod zoom;
+pub mod viewer_list;

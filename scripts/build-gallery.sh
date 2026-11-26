@@ -7,7 +7,16 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export ANDROID_HOME="${ANDROID_HOME:-$HOME/Android/Sdk}"
 export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_HOME/ndk/28.2.13676358}"
-cargo ndk -t arm64-v8a -P 26 -o android-gallery/app/src/main/jniLibs build --release -p gallery-app
+# GALLERY_EMULATOR=1 also builds for the PC-chip Android emulator. Its own
+# copy is removed otherwise, so a phone build never carries it.
+ABIS=(-t arm64-v8a)
+if [[ "${GALLERY_EMULATOR:-}" == 1 ]]; then
+    [[ "${1:-}" == "release" ]] && { echo "no emulator build in a release" >&2; exit 1; }
+    ABIS+=(-t x86_64)
+else
+    rm -rf android-gallery/app/src/main/jniLibs/x86_64
+fi
+cargo ndk "${ABIS[@]}" -P 26 -o android-gallery/app/src/main/jniLibs build --release -p gallery-app
 if [[ "${1:-}" == "release" ]]; then
     (cd android-gallery && ./gradlew --console=plain -q assembleRelease)
     APK=android-gallery/app/build/outputs/apk/release/app-release.apk

@@ -469,11 +469,18 @@ impl Renderer {
     }
 
     pub fn draw(&mut self, gl: &glow::Context, batch: &Batch, screen: (i32, i32)) {
+        self.draw_layer(gl, batch, screen, true);
+    }
+
+    /// `clear: false` draws over what's already there (the gallery's photo).
+    pub fn draw_layer(&mut self, gl: &glow::Context, batch: &Batch, screen: (i32, i32), clear: bool) {
         let items = batch.instances();
         unsafe {
             gl.viewport(0, 0, screen.0, screen.1);
-            gl.clear_color(0.0, 0.0, 0.0, 0.0);
-            gl.clear(glow::COLOR_BUFFER_BIT);
+            if clear {
+                gl.clear_color(0.0, 0.0, 0.0, 0.0);
+                gl.clear(glow::COLOR_BUFFER_BIT);
+            }
             if items.is_empty() {
                 return;
             }

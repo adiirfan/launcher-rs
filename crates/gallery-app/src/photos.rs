@@ -615,6 +615,12 @@ impl Photos {
         }
     }
 
+    /// Sort and lay out now if anything changed (the viewer needs the
+    /// order while the grid itself isn't being drawn).
+    pub fn refresh(&mut self, f: &Frame) {
+        self.relayout(f, Instant::now());
+    }
+
     /// Back: close a menu if one is open. Returns whether it did something.
     pub fn back(&mut self) -> bool {
         if self.menu != Menu::None {

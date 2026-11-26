@@ -196,6 +196,13 @@ impl Pager {
         }
     }
 
+    /// Be on `page` (clamped) at once, with no slide.
+    pub fn jump_to(&mut self, page: usize) {
+        self.drag = None;
+        self.snap = None;
+        self.page = page.min(self.pages - 1);
+    }
+
     /// Slide to `page` (clamped), dropping any drag in progress.
     pub fn snap_to(&mut self, page: usize, t: Instant) {
         let from = self.offset(t);
@@ -228,6 +235,18 @@ mod tests {
 
     fn ms(t0: Instant, n: u64) -> Instant {
         t0 + Duration::from_millis(n)
+    }
+
+    #[test]
+    fn jump_to_lands_without_sliding() {
+        let t0 = Instant::now();
+        let mut p = Pager::new(10, W);
+        p.jump_to(7);
+        assert_eq!(p.page(), 7);
+        assert_eq!(p.offset(t0), 7.0 * W);
+        assert!(!p.animating(t0));
+        p.jump_to(99);
+        assert_eq!(p.page(), 9);
     }
 
     #[test]

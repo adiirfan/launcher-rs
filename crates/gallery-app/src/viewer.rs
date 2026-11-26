@@ -1,0 +1,749 @@
+//! The full-screen viewer: swipe between pictures, pinch or double-tap to
+//! zoom (with full detail decoded for the part on screen once it's still),
+//! GIFs playing at their own speed, and the Holo bars with INFO.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use gallery_core::dates;
+use gallery_core::format;
+use gallery_core::media::{Kind, MediaItem};
+use gallery_core::viewer_list::index_after_removal;
+use gallery_core::zoom::Zoom;
+use glow::Context;
+use holo_platform::fonts::Weight;
+use holo_platform::holo::{self, TEXT_QUIET, WHITE};
+use holo_platform::render::Renderer;
+use launcher_core::pager::{Gesture, Pager};
+use launcher_draw::batch::Batch;
+use launcher_draw::{Rect, Rgba};
+
+use crate::chrome::BAR_DP;
+use crate::gif_player::GifPlayer;
+use crate::input::{Touch, TouchKind};
+use crate::photo_tex::{PhotoDraw, Tex};
+use crate::photos::Frame;
+use crate::thumbs::{self, Thumbs};
+use crate::viewer_jobs::{Done, Job, Jobs};
+use crate::widgets;
+
+const BOTTOM_DP: f32 = 64.0;
+/// Full detail is decoded once the picture has been still this long.
+const DETAIL_AFTER: Duration = Duration::from_millis(150);
+const DOUBLE_TAP: Duration = Duration::from_millis(300);
+const TOAST_FOR: Duration = Duration::from_millis(2000);
+const BAR_BG: f32 = 0.6;
+const LINE: u32 = 0x2A2A2A;
+const PANEL: u32 = 0x141414;
+const ROW_LINE: u32 = 0x262626;
+const FILE_GREY: u32 = 0xBDBDBD;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Action {
+    None,
+    Back,
+    Share(i64),
+    Delete(i64),
+    Favourite(i64),
+    More(i64),
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Button {
+    Back,
+    Star,
+    More,
+    Share,
+    Edit,
+    Info,
+    Delete,
+}
+
+struct Pic {
+    tex: Tex,
+    full: (u32, u32),
+}
+
+struct Region {
+    id: i64,
+    rect: (u32, u32, u32, u32),
+    sample: u32,
+    tex: Tex,
+}
+
+struct Gif {
+    id: i64,
+    player: GifPlayer,
+    tex: Option<Tex>,
+    next_at: Instant,
+}
+
+#[derive(Clone, Copy)]
+enum Mode {
+    Idle,
+    /// Finger down, not yet moved far enough to say what it's doing.
+    Undecided { x: f32, y: f32, t: Instant },
+    Pan { x: f32, y: f32 },
+    Page,
+    Pinch { dist: f32, mid: (f32, f32) },
+    /// The rest of a gesture that already did something else.
+    Ignore,
+}
+
+pub struct Viewer {
+    d: f32,
+    items: Arc<Vec<MediaItem>>,
+    /// Indexes into `items`, in the order the grid showed them.
+    order: Vec<u32>,
+    pager: Pager,
+    current: Option<i64>,
+    pics: HashMap<i64, Pic>,
+    failed: HashSet<i64>,
+    region: Option<Region>,
+    zoom: Option<Zoom>,
+    zoom_changed: Instant,
+    gif: Option<Gif>,
+    gif_bytes_failed: HashSet<i64>,
+    details: Option<(i64, [String; 5])>,
+    bars: bool,
+    info: bool,
+    toast: Option<Instant>,
+    mode: Mode,
+    press: Option<Button>,
+    last_tap: Option<(Instant, f32, f32)>,
+    pending_tap: Option<Instant>,
+    last: Option<Frame>,
+}
+
+impl Viewer {
+    pub fn open(d: f32, items: Arc<Vec<MediaItem>>, order: Vec<u32>, index: usize, width: f32) -> Viewer {
+        let mut pager = Pager::new_with_slop(order.len().max(1), width.max(1.0), 8.0 * d);
+        pager.jump_to(index);
+        Viewer {
+            d,
+            items,
+            order,
+            pager,
+            current: None,
+            pics: HashMap::new(),
+            failed: HashSet::new(),
+            region: None,
+            zoom: None,
+            zoom_changed: Instant::now(),
+            gif: None,
+            gif_bytes_failed: HashSet::new(),
+            details: None,
+            bars: true,
+            info: false,
+            toast: None,
+            mode: Mode::Idle,
+            press: None,
+            last_tap: None,
+            pending_tap: None,
+            last: None,
+        }
+    }
+
+    fn item(&self, page: usize) -> Option<&MediaItem> {
+        self.order.get(page).map(|&i| &self.items[i as usize])
+    }
+
+    fn ids(&self) -> Vec<i64> {
+        self.order.iter().map(|&i| self.items[i as usize].id).collect()
+    }
+
+    /// The library or the grid's order changed: stay on the same picture,
+    /// or the next one if it's gone. Returns false when nothing is left.
+    pub fn set_list(&mut self, items: Arc<Vec<MediaItem>>, order: Vec<u32>) -> bool {
+        let old = self.ids();
+        let current = self.item(self.pager.page()).map(|i| i.id).unwrap_or(-1);
+        self.items = items;
+        self.order = order;
+        let Some(at) = index_after_removal(&old, current, &self.ids()) else { return false };
+        self.pager.set_pages(self.order.len());
+        self.pager.jump_to(at);
+        true
+    }
+
+    /// Back: close INFO first. Returns whether it did something.
+    pub fn back(&mut self) -> bool {
+        std::mem::take(&mut self.info)
+    }
+
+    /// Free the graphics memory; call before dropping the viewer.
+    pub fn free(mut self, gl: &Context) {
+        for (_, p) in self.pics.drain() {
+            p.tex.free(gl);
+        }
+        if let Some(r) = self.region.take() {
+            r.tex.free(gl);
+        }
+        if let Some(t) = self.gif.take().and_then(|g| g.tex) {
+            t.free(gl);
+        }
+    }
+
+    /// Picture size as it stands upright, before the decoded one arrives.
+    fn upright(it: &MediaItem) -> (u32, u32) {
+        if it.orientation == 90 || it.orientation == 270 { (it.h, it.w) } else { (it.w, it.h) }
+    }
+
+    fn full_size(&self, it: &MediaItem) -> (f32, f32) {
+        let (w, h) = self.pics.get(&it.id).map_or_else(|| Self::upright(it), |p| p.full);
+        (w.max(1) as f32, h.max(1) as f32)
+    }
+
+    /// Take finished decodes; keep only what's near the current picture.
+    fn absorb(&mut self, gl: &Context, jobs: &Jobs, now: Instant) {
+        let page = self.pager.page();
+        let near: HashSet<i64> = (page.saturating_sub(1)..=page + 1).filter_map(|p| self.item(p).map(|i| i.id)).collect();
+        for done in jobs.take() {
+            match done {
+                Done::Full { id, w, h, full, rgba } if near.contains(&id) => {
+                    if let Some(tex) = Tex::upload(gl, w, h, &rgba) {
+                        if let Some(old) = self.pics.insert(id, Pic { tex, full }) {
+                            old.tex.free(gl);
+                        }
+                        // Now the real size is known: fit it afresh if untouched.
+                        if self.current == Some(id) && self.zoom.is_none_or(|z| z.is_fit()) {
+                            self.zoom = None;
+                        }
+                    }
+                }
+                Done::Region { id, rect, w, h, rgba } if self.current == Some(id) => {
+                    let sample = (rect.2 / w.max(1)).max(1);
+                    if let Some(tex) = Tex::upload(gl, w, h, &rgba)
+                        && let Some(old) = self.region.replace(Region { id, rect, sample, tex })
+                    {
+                        old.tex.free(gl);
+                    }
+                }
+                Done::Gif { id, bytes } if self.current == Some(id) => match GifPlayer::new(bytes) {
+                    Some(player) => self.gif = Some(Gif { id, player, tex: None, next_at: now }),
+                    None => {
+                        self.gif_bytes_failed.insert(id);
+                    }
+                },
+                Done::Details { id, fields } => self.details = Some((id, fields)),
+                Done::Failed(Job::Full { id, .. }) => {
+                    self.failed.insert(id);
+                }
+                Done::Failed(Job::Gif { id }) => {
+                    self.gif_bytes_failed.insert(id);
+                }
+                _ => {}
+            }
+        }
+        let stale: Vec<i64> = self.pics.keys().copied().filter(|id| !near.contains(id)).collect();
+        for id in stale {
+            if let Some(p) = self.pics.remove(&id) {
+                p.tex.free(gl);
+            }
+        }
+    }
+
+    /// The page settled on another picture: drop the old one's extras.
+    fn arrive(&mut self, gl: &Context) {
+        let id = self.item(self.pager.page()).map(|i| i.id);
+        if id == self.current {
+            return;
+        }
+        self.current = id;
+        self.zoom = None;
+        if let Some(r) = self.region.take() {
+            r.tex.free(gl);
+        }
+        if let Some(t) = self.gif.take().and_then(|g| g.tex) {
+            t.free(gl);
+        }
+    }
+
+    /// The part on screen needs more detail than the screen-size copy has.
+    fn detail_job(&self, now: Instant) -> Option<Job> {
+        let id = self.current?;
+        let it = self.item(self.pager.page())?;
+        let (pic, z) = (self.pics.get(&id)?, self.zoom?);
+        if it.kind != Kind::Image || !matches!(self.mode, Mode::Idle) || now < self.zoom_changed + DETAIL_AFTER {
+            return None;
+        }
+        let texels_per_px = (pic.tex.w as f32 / pic.full.0.max(1) as f32) / z.scale();
+        if texels_per_px >= 0.95 {
+            return None;
+        }
+        let (x, y, w, h) = z.source_rect();
+        let mut sample = 1u32;
+        while (sample * 2) as f32 <= 1.0 / z.scale() {
+            sample *= 2;
+        }
+        let rect = (x.floor() as u32, y.floor() as u32, (w.ceil() as u32).max(1), (h.ceil() as u32).max(1));
+        if self.region.as_ref().is_some_and(|r| r.rect == rect && r.sample == sample) {
+            return None;
+        }
+        Some(Job::Region { id, orientation: it.orientation, rect, sample })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw(&mut self, gl: &Context, r: &mut Renderer, batch: &mut Batch, pd: &PhotoDraw, _thumbs: &Thumbs, jobs: &Jobs, f: Frame, now: Instant) -> bool {
+        let d = self.d;
+        self.last = Some(f);
+        self.pager.set_width(f.w);
+        let screen = (f.w as i32, f.h as i32);
+        self.absorb(gl, jobs, now);
+        if !self.pager.animating(now) && !matches!(self.mode, Mode::Page) {
+            self.arrive(gl);
+        }
+        let page = self.pager.page();
+
+        // What to decode, most wanted first.
+        let mut want = Vec::new();
+        let max = (f.w as u32, f.h as u32);
+        let full_job = |it: &MediaItem| Job::Full { id: it.id, orientation: it.orientation, max };
+        let wants_full = |v: &Viewer, it: &MediaItem| it.kind != Kind::Video && !v.pics.contains_key(&it.id) && !v.failed.contains(&it.id);
+        if let Some(it) = self.item(page) {
+            if wants_full(self, it) {
+                want.push(full_job(it));
+            }
+            if it.kind == Kind::Gif && self.gif.as_ref().is_none_or(|g| g.id != it.id) && !self.gif_bytes_failed.contains(&it.id) {
+                want.push(Job::Gif { id: it.id });
+            }
+            if self.info && self.details.as_ref().is_none_or(|(id, _)| *id != it.id) && it.kind != Kind::Video {
+                want.push(Job::Details { id: it.id });
+            }
+        }
+        want.extend(self.detail_job(now));
+        for p in [page + 1, page.wrapping_sub(1)] {
+            if let Some(it) = self.item(p)
+                && wants_full(self, it)
+            {
+                want.push(full_job(it));
+            }
+        }
+        jobs.want(want);
+
+        // The next GIF frame, when it's due.
+        let mut moving = self.pager.animating(now) || !matches!(self.mode, Mode::Idle);
+        if let Some(g) = self.gif.as_mut() {
+            moving = true;
+            if now >= g.next_at
+                && let Some(fr) = g.player.next()
+            {
+                match &g.tex {
+                    Some(t) => t.update(gl, &fr.rgba),
+                    None => g.tex = Tex::upload(gl, g.player.w, g.player.h, &fr.rgba),
+                }
+                g.next_at = now + fr.delay;
+            }
+        }
+        if self.pending_tap.is_some_and(|t| now >= t + DOUBLE_TAP) {
+            self.pending_tap = None;
+            self.bars = !self.bars;
+            if !self.bars {
+                self.info = false;
+            }
+        }
+        moving |= self.pending_tap.is_some() || self.toast.is_some_and(|t| now < t + TOAST_FOR);
+        // Keep drawing until the zoomed picture has been still long enough
+        // to ask for full detail.
+        moving |= self.zoom.is_some_and(|z| !z.is_fit()) && now < self.zoom_changed + DETAIL_AFTER + Duration::from_millis(40);
+
+        // Pictures first, straight onto the screen.
+        PhotoDraw::clear(gl, screen);
+        let offset = self.pager.offset(now);
+        let view = (f.w, f.h);
+        for p in [page.wrapping_sub(1), page, page + 1] {
+            let Some(it) = self.item(p).cloned() else { continue };
+            let it = &it;
+            let shift = p as f32 * f.w - offset;
+            if shift.abs() >= f.w {
+                continue;
+            }
+            let full = self.full_size(it);
+            let is_current = Some(it.id) == self.current;
+            if is_current && self.zoom.is_none() {
+                self.zoom = Some(Zoom::fit(full, view));
+            }
+            let z = if is_current { self.zoom.unwrap() } else { Zoom::fit(full, view) };
+            let (x, y, w, h) = z.dest();
+            let gif_tex = self.gif.as_ref().filter(|g| g.id == it.id).and_then(|g| g.tex.as_ref());
+            if let Some(t) = gif_tex.or(self.pics.get(&it.id).map(|p| &p.tex)) {
+                pd.draw(gl, t, (x + shift, y, w, h), (0.0, 0.0, 1.0, 1.0), screen);
+            }
+            if is_current && let Some(reg) = self.region.as_ref().filter(|r| r.id == it.id) {
+                let s = z.scale();
+                let (rx, ry, rw, rh) = reg.rect;
+                pd.draw(gl, &reg.tex, (x + shift + rx as f32 * s, y + ry as f32 * s, rw as f32 * s, rh as f32 * s), (0.0, 0.0, 1.0, 1.0), screen);
+            }
+            // Videos play in a later step; until then their thumbnail and a play sign.
+            if it.kind == Kind::Video || (!self.pics.contains_key(&it.id) && gif_tex.is_none()) {
+                let side = (f.w.min(f.h) * 0.6).min(w.max(h));
+                let tile = Rect::new(f.w / 2.0 - side / 2.0 + shift, f.h / 2.0 - side / 2.0, side, side);
+                if let Some(uv) = r.icon_uv(&thumbs::key(it.id)) {
+                    batch.image(tile, uv, 0.0, 1.0);
+                }
+                if it.kind == Kind::Video {
+                    let (cx, cy) = (f.w / 2.0 + shift, f.h / 2.0);
+                    batch.circle(cx, cy, 36.0 * d, Rgba::hex(0xFFFFFF));
+                    batch.circle(cx, cy, 34.0 * d, Rgba::hex(0x000000).with_alpha(0.5));
+                    widgets::play_triangle(batch, cx - 8.0 * d, cy, 26.0 * d, Rgba::hex(WHITE));
+                }
+            }
+        }
+
+        if self.bars {
+            self.draw_bars(gl, r, batch, &f, now);
+        }
+        moving
+    }
+
+    fn top_h(&self, f: &Frame) -> f32 {
+        f.ins.top + BAR_DP * self.d
+    }
+
+    fn bottom_y(&self, f: &Frame) -> f32 {
+        f.h - f.ins.bottom - BOTTOM_DP * self.d
+    }
+
+    fn button_rects(&self, f: &Frame) -> [(Button, Rect); 7] {
+        let d = self.d;
+        let top = f.ins.top;
+        let by = self.bottom_y(f);
+        let q = (f.w - f.ins.left - f.ins.right) / 4.0;
+        let bx = |i: f32| Rect::new(f.ins.left + q * i, by, q, BOTTOM_DP * d);
+        [
+            (Button::Back, Rect::new(0.0, top, 52.0 * d, BAR_DP * d)),
+            (Button::Star, Rect::new(f.w - 96.0 * d, top, 48.0 * d, BAR_DP * d)),
+            (Button::More, Rect::new(f.w - 48.0 * d, top, 48.0 * d, BAR_DP * d)),
+            (Button::Share, bx(0.0)),
+            (Button::Edit, bx(1.0)),
+            (Button::Info, bx(2.0)),
+            (Button::Delete, bx(3.0)),
+        ]
+    }
+
+    fn draw_bars(&self, gl: &Context, r: &mut Renderer, batch: &mut Batch, f: &Frame, now: Instant) {
+        let d = self.d;
+        let Some(it) = self.item(self.pager.page()) else { return };
+        let accent = Rgba::hex(holo::accent());
+        let shade = Rgba::hex(0x000000).with_alpha(BAR_BG);
+        let white = Rgba::hex(WHITE);
+        let pressed = |b: Button| self.press == Some(b);
+        let rects = self.button_rects(f);
+        let rect_of = |b: Button| rects.iter().find(|x| x.0 == b).unwrap().1;
+
+        // Top: back, when and file name, star, more.
+        let top_h = self.top_h(f);
+        batch.rect(Rect::new(0.0, 0.0, f.w, top_h), shade, 0.0);
+        for b in [Button::Back, Button::Star, Button::More] {
+            if pressed(b) {
+                batch.rect(rect_of(b), accent.with_alpha(0.3), 0.0);
+            }
+        }
+        let cy = f.ins.top + BAR_DP * d / 2.0;
+        let u = d;
+        icon(batch, &[&[(23.0, cy / u - 7.0), (17.0, cy / u), (23.0, cy / u + 7.0)]], 0.0, 0.0, u, 2.0 * d, white);
+        let tx = 52.0 * d;
+        let tw = f.w - tx - 100.0 * d;
+        let when = dates::short_when(it.when_taken(), f.utc_offset_s, f.today);
+        r.text(gl, batch, &when, tx, cy - 2.0 * d, 17.0 * d, tw, white, Weight::Regular);
+        r.text(gl, batch, &it.name, tx, cy + 17.0 * d, 13.0 * d, tw, Rgba::hex(FILE_GREY), Weight::Regular);
+        let star = rect_of(Button::Star);
+        star_icon(batch, star.x + star.w / 2.0 - 11.0 * d, cy - 11.0 * d, 22.0 * d, it.favourite);
+        widgets::overflow(batch, f.w - 24.0 * d, cy, d);
+
+        // Bottom: SHARE, EDIT, INFO, DELETE.
+        let by = self.bottom_y(f);
+        batch.rect(Rect::new(0.0, by, f.w, f.h - by), shade, 0.0);
+        batch.rect(Rect::new(0.0, by, f.w, 1.0 * d), Rgba::hex(LINE), 0.0);
+        for (b, label) in [(Button::Share, "SHARE"), (Button::Edit, "EDIT"), (Button::Info, "INFO"), (Button::Delete, "DELETE")] {
+            let rc = rect_of(b);
+            if pressed(b) {
+                batch.rect(rc, accent.with_alpha(0.3), 0.0);
+            }
+            let c = match b {
+                Button::Info if self.info => accent,
+                Button::Edit => Rgba::hex(0x6E6E6E),
+                _ => white,
+            };
+            let (ix, iy, s) = (rc.x + rc.w / 2.0 - 11.0 * d, rc.y + 12.0 * d, 22.0 * d);
+            bottom_icon(batch, b, ix, iy, s, it.kind == Kind::Video, c);
+            let em = 12.0 * d;
+            let lw = r.measure_spaced(label, em, 0.6 * d, Weight::Medium);
+            r.text_spaced(gl, batch, label, rc.x + (rc.w - lw) / 2.0, rc.y + 50.0 * d, em, 0.6 * d, rc.w, c, Weight::Medium);
+        }
+
+        if self.info {
+            self.draw_info(gl, r, batch, f, it, by);
+        }
+        if self.toast.is_some_and(|t| now < t + TOAST_FOR) {
+            let msg = "Coming in a later version";
+            let em = 14.0 * d;
+            let mw = r.measure(msg, em, f.w, Weight::Regular);
+            let (w, h) = (mw + 40.0 * d, 40.0 * d);
+            let rc = Rect::new((f.w - w) / 2.0, by - h - 24.0 * d, w, h);
+            batch.rect(rc, Rgba::hex(0x333333).with_alpha(0.95), 4.0 * d);
+            r.text(gl, batch, msg, rc.x + 20.0 * d, widgets::baseline(r, rc.y + h / 2.0, em, d), em, mw + 1.0, white, Weight::Regular);
+        }
+    }
+
+    fn info_rows(&self, f: &Frame, it: &MediaItem) -> Vec<(&'static str, String)> {
+        let full = self.pics.get(&it.id).map_or_else(|| Self::upright(it), |p| p.full);
+        let mut size = format!("{} · {} × {}", format::bytes(it.size), full.0, full.1);
+        if it.kind == Kind::Video {
+            size.push_str(&format!(" · {}", format::duration(it.duration_ms)));
+        }
+        let mut rows = vec![("Taken", dates::full_when(it.when_taken(), f.utc_offset_s)), ("File", it.name.clone()), ("Size", size)];
+        if let Some((id, fields)) = &self.details
+            && *id == it.id
+        {
+            let camera: Vec<&str> = fields[..4].iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+            if !camera.is_empty() {
+                rows.push(("Camera", camera.join(" · ")));
+            }
+            if !fields[4].is_empty() {
+                rows.push(("Location", fields[4].replace(',', ", ")));
+            }
+        }
+        rows.push(("Folder", it.folder.clone()));
+        rows
+    }
+
+    fn draw_info(&self, gl: &Context, r: &mut Renderer, batch: &mut Batch, f: &Frame, it: &MediaItem, bottom: f32) {
+        let d = self.d;
+        let rows = self.info_rows(f, it);
+        let row_h = 58.0 * d;
+        let h = 4.0 * d + 40.0 * d + rows.len() as f32 * row_h + 12.0 * d;
+        let y = bottom - h;
+        let accent = Rgba::hex(holo::accent());
+        batch.rect(Rect::new(0.0, y, f.w, h), Rgba::hex(PANEL), 0.0);
+        batch.rect(Rect::new(0.0, y, f.w, 2.0 * d), accent, 0.0);
+        let x = f.ins.left + 16.0 * d;
+        let w = f.w - f.ins.left - f.ins.right - 32.0 * d;
+        widgets::heading(gl, r, batch, x, y + 16.0 * d, w, "DETAILS", "", d);
+        let mut ry = y + 44.0 * d;
+        for (k, v) in rows {
+            r.text(gl, batch, k, x + 4.0 * d, ry + 22.0 * d, 13.0 * d, w, Rgba::hex(TEXT_QUIET), Weight::Regular);
+            r.text(gl, batch, &v, x + 4.0 * d, ry + 43.0 * d, 16.0 * d, w - 8.0 * d, Rgba::hex(WHITE), Weight::Regular);
+            batch.rect(Rect::new(x, ry + row_h - 1.0 * d, w, 1.0 * d), Rgba::hex(ROW_LINE), 0.0);
+            ry += row_h;
+        }
+    }
+
+    fn button_at(&self, x: f32, y: f32) -> Option<Button> {
+        let f = self.last?;
+        if !self.bars {
+            return None;
+        }
+        self.button_rects(&f).iter().find(|(_, rc)| rc.contains(x, y)).map(|(b, _)| *b)
+    }
+
+    fn in_bars(&self, y: f32) -> bool {
+        let Some(f) = self.last else { return false };
+        self.bars && (y < self.top_h(&f) || y >= self.bottom_y(&f))
+    }
+
+    pub fn touch(&mut self, t: Touch) -> Action {
+        let d = self.d;
+        match t.kind {
+            TouchKind::Down => {
+                self.press = self.button_at(t.x, t.y);
+                self.mode = if self.press.is_some() || self.in_bars(t.y) { Mode::Ignore } else { Mode::Undecided { x: t.x, y: t.y, t: t.t } };
+            }
+            TouchKind::Move => match self.mode {
+                Mode::Undecided { x, y, t: t0 } => {
+                    let (dx, dy) = (t.x - x, t.y - y);
+                    if dx.hypot(dy) < 8.0 * d {
+                        return Action::None;
+                    }
+                    let zoomed = self.zoom.is_some_and(|z| !z.is_fit());
+                    let sideways = dx.abs() > dy.abs();
+                    let stuck = zoomed && sideways && {
+                        let mut probe = self.zoom.unwrap();
+                        probe.pan(dx, 0.0) == dx
+                    };
+                    if zoomed && !stuck {
+                        if let Some(z) = self.zoom.as_mut() {
+                            z.pan(dx, dy);
+                        }
+                        self.zoom_changed = t.t;
+                        self.mode = Mode::Pan { x: t.x, y: t.y };
+                    } else {
+                        self.pager.touch_down(x, y, t0);
+                        self.pager.touch_move(t.x, t.y, t.t);
+                        self.mode = Mode::Page;
+                    }
+                }
+                Mode::Pan { x, y } => {
+                    if let Some(z) = self.zoom.as_mut() {
+                        z.pan(t.x - x, t.y - y);
+                    }
+                    self.zoom_changed = t.t;
+                    self.mode = Mode::Pan { x: t.x, y: t.y };
+                }
+                Mode::Page => self.pager.touch_move(t.x, t.y, t.t),
+                Mode::Pinch { dist, mid } => {
+                    if let Some(p) = t.second {
+                        let nd = (t.x - p.0).hypot(t.y - p.1).max(1.0);
+                        let nm = ((t.x + p.0) / 2.0, (t.y + p.1) / 2.0);
+                        if let Some(z) = self.zoom.as_mut() {
+                            z.pinch(nd / dist, nm);
+                            z.pan(nm.0 - mid.0, nm.1 - mid.1);
+                        }
+                        self.zoom_changed = t.t;
+                        self.mode = Mode::Pinch { dist: nd, mid: nm };
+                    }
+                }
+                Mode::Idle | Mode::Ignore => {
+                    if self.press.is_some() && self.button_at(t.x, t.y) != self.press {
+                        self.press = None;
+                    }
+                }
+            },
+            TouchKind::SecondDown => {
+                if let Some(p) = t.second
+                    && !matches!(self.mode, Mode::Ignore)
+                {
+                    if matches!(self.mode, Mode::Page) {
+                        self.pager.touch_cancel(t.t);
+                    }
+                    self.pending_tap = None;
+                    self.mode = Mode::Pinch { dist: (t.x - p.0).hypot(t.y - p.1).max(1.0), mid: ((t.x + p.0) / 2.0, (t.y + p.1) / 2.0) };
+                }
+            }
+            TouchKind::SecondUp => {
+                if matches!(self.mode, Mode::Pinch { .. }) {
+                    self.mode = Mode::Ignore;
+                }
+            }
+            TouchKind::Up => {
+                let mode = std::mem::replace(&mut self.mode, Mode::Idle);
+                if let Some(b) = self.press.take() {
+                    return self.pressed(b, t.t);
+                }
+                match mode {
+                    Mode::Page => {
+                        if let Gesture::Tap { .. } = self.pager.touch_up(t.x, t.y, t.t) {
+                            self.tap(t.x, t.y, t.t);
+                        }
+                    }
+                    Mode::Undecided { .. } => self.tap(t.x, t.y, t.t),
+                    _ => {}
+                }
+            }
+            TouchKind::Cancel => {
+                if matches!(self.mode, Mode::Page) {
+                    self.pager.touch_cancel(t.t);
+                }
+                self.mode = Mode::Idle;
+                self.press = None;
+            }
+        }
+        Action::None
+    }
+
+    /// One tap waits a moment in case a second makes it a double tap.
+    fn tap(&mut self, x: f32, y: f32, t: Instant) {
+        let near = self.last_tap.is_some_and(|(t0, x0, y0)| t.duration_since(t0) < DOUBLE_TAP && (x - x0).hypot(y - y0) < 40.0 * self.d);
+        if near {
+            self.last_tap = None;
+            self.pending_tap = None;
+            if let Some(z) = self.zoom.as_mut() {
+                z.double_tap((x, y));
+                self.zoom_changed = t;
+            }
+        } else {
+            self.last_tap = Some((t, x, y));
+            self.pending_tap = Some(t);
+        }
+    }
+
+    fn pressed(&mut self, b: Button, t: Instant) -> Action {
+        let Some(id) = self.item(self.pager.page()).map(|i| i.id) else { return Action::None };
+        match b {
+            Button::Back => Action::Back,
+            Button::Star => Action::Favourite(id),
+            Button::More => Action::More(id),
+            Button::Share => Action::Share(id),
+            Button::Delete => Action::Delete(id),
+            Button::Info => {
+                self.info = !self.info;
+                Action::None
+            }
+            Button::Edit => {
+                self.toast = Some(t);
+                Action::None
+            }
+        }
+    }
+}
+
+/// Lines through points given on a `u`-sized grid, offset by `x, y`.
+fn icon(batch: &mut Batch, lines: &[&[(f32, f32)]], x: f32, y: f32, u: f32, width: f32, c: Rgba) {
+    for pts in lines {
+        for w in pts.windows(2) {
+            holo::stroke(batch, (x + w[0].0 * u, y + w[0].1 * u), (x + w[1].0 * u, y + w[1].1 * u), width, c);
+        }
+    }
+}
+
+const STAR: [(f32, f32); 11] = [
+    (12.0, 3.0),
+    (14.7, 8.6),
+    (20.8, 9.5),
+    (16.4, 13.8),
+    (17.4, 19.9),
+    (12.0, 17.0),
+    (6.6, 19.9),
+    (7.6, 13.8),
+    (3.2, 9.5),
+    (9.3, 8.6),
+    (12.0, 3.0),
+];
+
+/// The favourite star: an outline, filled with the accent when chosen.
+fn star_icon(batch: &mut Batch, x: f32, y: f32, size: f32, on: bool) {
+    let u = size / 24.0;
+    let c = if on { Rgba::hex(holo::accent()) } else { Rgba::hex(WHITE) };
+    if on {
+        // Fill: strokes from the middle out to points all round the edge.
+        let mid = (12.0, 12.6);
+        for w in STAR.windows(2) {
+            for k in 0..8 {
+                let f = k as f32 / 8.0;
+                let p = (w[0].0 + (w[1].0 - w[0].0) * f, w[0].1 + (w[1].1 - w[0].1) * f);
+                holo::stroke(batch, (x + mid.0 * u, y + mid.1 * u), (x + p.0 * u, y + p.1 * u), 1.6 * u, c);
+            }
+        }
+    }
+    icon(batch, &[&STAR], x, y, u, 1.8 * u, c);
+}
+
+fn circle_ring(batch: &mut Batch, cx: f32, cy: f32, r: f32, width: f32, c: Rgba) {
+    batch.outline(Rect::new(cx - r, cy - r, r * 2.0, r * 2.0), c, r, width);
+}
+
+/// The bottom bar's icons, on a 24-unit square as the mockup's.
+fn bottom_icon(batch: &mut Batch, b: Button, x: f32, y: f32, size: f32, video: bool, c: Rgba) {
+    let u = size / 24.0;
+    let lw = 1.8 * u;
+    match b {
+        Button::Share => {
+            for (cx, cy) in [(18.0, 7.0), (6.0, 12.0), (18.0, 17.0)] {
+                circle_ring(batch, x + cx * u, y + cy * u, 2.0 * u, lw, c);
+            }
+            icon(batch, &[&[(8.0, 11.0), (16.0, 7.6)], &[(8.0, 13.0), (16.0, 16.4)]], x, y, u, lw, c);
+        }
+        Button::Edit if video => {
+            circle_ring(batch, x + 6.0 * u, y + 6.0 * u, 2.0 * u, lw, c);
+            circle_ring(batch, x + 6.0 * u, y + 18.0 * u, 2.0 * u, lw, c);
+            icon(batch, &[&[(7.5, 7.5), (20.0, 18.0)], &[(7.5, 16.5), (20.0, 6.0)]], x, y, u, lw, c);
+        }
+        Button::Edit => icon(batch, &[&[(4.0, 20.0), (8.0, 20.0), (19.0, 9.0), (15.0, 5.0), (4.0, 16.0), (4.0, 20.0)], &[(13.0, 7.0), (17.0, 11.0)]], x, y, u, lw, c),
+        Button::Info => {
+            circle_ring(batch, x + 12.0 * u, y + 12.0 * u, 9.0 * u, lw, c);
+            icon(batch, &[&[(12.0, 11.0), (12.0, 17.0)], &[(12.0, 7.3), (12.0, 8.3)]], x, y, u, lw, c);
+        }
+        Button::Delete => icon(batch, &[&[(5.0, 7.0), (19.0, 7.0)], &[(9.0, 7.0), (9.0, 4.0), (15.0, 4.0), (15.0, 7.0)], &[(7.0, 7.0), (8.0, 20.0), (16.0, 20.0), (17.0, 7.0)]], x, y, u, lw, c),
+        _ => {}
+    }
+}

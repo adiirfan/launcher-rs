@@ -3,6 +3,10 @@
 
 mod albums_screen;
 mod bars;
+mod gif_player;
+mod photo_tex;
+mod viewer;
+mod viewer_jobs;
 mod chrome;
 mod input;
 mod library;
@@ -30,6 +34,7 @@ use launcher_draw::{Rect, Rgba};
 use albums_screen::AlbumsScreen;
 use photos::{Action, Photos};
 use thumbs::Thumbs;
+use viewer::Viewer;
 
 /// Work longer than this risks missing the screen's next refresh.
 const SLOW: Duration = Duration::from_millis(8);
@@ -54,6 +59,13 @@ fn android_main(app: AndroidApp) {
     // An open album: the same grid with a filter and a back arrow.
     let mut album: Option<Photos> = None;
     let mut on_albums = false;
+    let jobs = viewer_jobs::Jobs::new(&app);
+    let mut viewer: Option<Viewer> = None;
+    // Closed viewers whose pictures still need freeing (needs the GL context).
+    let mut closed: Vec<Viewer> = Vec::new();
+    let mut viewer_list_stale = false;
+    let mut photo_draw: Option<photo_tex::PhotoDraw> = None;
+    let mut screen_w = 1080.0f32;
     let mut asked_access = false;
 
     let mut sched = FrameScheduler::new();
@@ -118,6 +130,14 @@ fn android_main(app: AndroidApp) {
             sched.request_redraw();
         }
         for t in input.touches {
+            if let Some(v) = viewer.as_mut() {
+                match v.touch(t) {
+                    viewer::Action::None => {}
+                    viewer::Action::Back => closed.extend(viewer.take()),
+                    other => log::info!("not built yet: {other:?}"),
+                }
+                continue;
+            }
             let action = match (album.as_mut(), on_albums) {
                 (Some(a), _) => a.touch(t, library::access()),
                 (None, true) => {
@@ -138,6 +158,10 @@ fn android_main(app: AndroidApp) {
             };
             match action {
                 Action::None => {}
+                Action::Open(i) => {
+                    let grid = album.as_ref().unwrap_or(&photos);
+                    viewer = Some(Viewer::open(photos_density(&app), grid.items().clone(), grid.arranged().order.clone(), i as usize, screen_w));
+                }
                 Action::Albums => on_albums = true,
                 Action::Back => {
                     if let Some(a) = album.take() {
@@ -156,7 +180,11 @@ fn android_main(app: AndroidApp) {
         }
         if input.back {
             sched.request_redraw();
-            if let Some(a) = album.as_mut() {
+            if let Some(v) = viewer.as_mut() {
+                if !v.back() {
+                    closed.extend(viewer.take());
+                }
+            } else if let Some(a) = album.as_mut() {
                 if !a.back() {
                     let a = album.take().unwrap();
                     photos.set_sort(a.sort, a.order);
@@ -174,13 +202,14 @@ fn android_main(app: AndroidApp) {
                 a.set_items(fresh.clone());
             }
             photos.set_items(fresh);
+            viewer_list_stale = viewer.is_some();
             thumbs.clear_failures();
             sched.request_redraw();
         }
         if library::take_asked() {
             sched.request_redraw();
         }
-        if thumbs.has_ready() {
+        if thumbs.has_ready() || jobs.has_done() {
             sched.request_redraw();
         }
 
@@ -227,23 +256,39 @@ fn android_main(app: AndroidApp) {
                 if had_ready && !more {
                     Thumbs::settle(g.gl());
                 }
-                batch.rect(Rect::new(0.0, 0.0, w, h), Rgba::hex(BLACK), 0.0);
+                screen_w = w;
+                for v in closed.drain(..) {
+                    v.free(g.gl());
+                }
+                if viewer.is_none() {
+                    batch.rect(Rect::new(0.0, 0.0, w, h), Rgba::hex(BLACK), 0.0);
+                }
                 photos.set_density(d);
                 albums.set_density(d);
                 let (today, utc_offset_s) = system::local_today();
                 let frame = photos::Frame { w, h, ins, today, utc_offset_s };
                 let access = library::access();
-                let (anim, missing) = match (album.as_mut(), on_albums) {
+                if std::mem::take(&mut viewer_list_stale) && let Some(v) = viewer.as_mut() {
+                    let grid = album.as_mut().unwrap_or(&mut photos);
+                    grid.refresh(&frame);
+                    if !v.set_list(grid.items().clone(), grid.arranged().order.clone()) {
+                        closed.extend(viewer.take());
+                    }
+                }
+                let (anim, missing) = if let Some(v) = viewer.as_mut() {
+                    let pd = photo_draw.get_or_insert_with(|| photo_tex::PhotoDraw::new(g.gl()));
+                    (v.draw(g.gl(), r, &mut batch, pd, &thumbs, &jobs, frame, now), Vec::new())
+                } else { match (album.as_mut(), on_albums) {
                     (Some(a), _) => {
                         a.set_density(d);
                         a.draw(g.gl(), r, &mut batch, &thumbs, frame, access, now)
                     }
                     (None, true) => albums.draw(g.gl(), r, &mut batch, &thumbs, frame, now),
                     (None, false) => photos.draw(g.gl(), r, &mut batch, &thumbs, frame, access, now),
-                };
+                } };
                 thumbs.request(&missing);
                 moving = anim;
-                r.draw(g.gl(), &batch, screen);
+                r.draw_layer(g.gl(), &batch, screen, viewer.is_none());
                 if t0.elapsed() > SLOW {
                     log::info!("slow frame: {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
                 }

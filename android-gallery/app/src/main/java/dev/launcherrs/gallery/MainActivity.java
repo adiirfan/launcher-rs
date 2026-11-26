@@ -129,6 +129,22 @@ public class MainActivity extends NativeActivity {
         return Thumbs.load(this, id, video, orientation, size);
     }
 
+    /** Rust (viewer threads): a whole picture at screen size; see Pictures. */
+    public byte[] decodePicture(long id, int orientation, int maxW, int maxH) {
+        return Pictures.decode(this, id, orientation, maxW, maxH);
+    }
+
+    /** Rust (viewer threads): part of a picture at full detail. */
+    public byte[] decodeRegion(long id, int orientation, int x, int y, int w, int h, int sample) {
+        return Pictures.decodeRegion(this, id, orientation, x, y, w, h, sample);
+    }
+
+    /** Rust (viewer threads): a GIF's bytes. */
+    public byte[] readAll(long id) { return Pictures.readAll(this, id); }
+
+    /** Rust (INFO panel): camera, aperture, shutter, ISO, location, one per line. */
+    public String pictureDetails(long id) { return String.join("\n", Pictures.details(this, id)); }
+
     static native void onInsets(int top, int bottom, int left, int right);
     static native void onAccess(int sdk, boolean images, boolean video, boolean selected, boolean legacy);
     static native void onAsked();

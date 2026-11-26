@@ -68,9 +68,64 @@ pub fn day_label(d: CivilDate, today: CivilDate) -> String {
     s
 }
 
+/// "09:30", local time of day.
+fn clock(ms: i64, utc_offset_s: i32) -> String {
+    let minutes = (ms + utc_offset_s as i64 * 1000).div_euclid(60_000).rem_euclid(24 * 60);
+    format!("{:02}:{:02}", minutes / 60, minutes % 60)
+}
+
+/// "Monday" from "MONDAY", "Nov" from "NOV".
+fn title_case(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_string() + &c.as_str().to_lowercase()).unwrap_or_default()
+}
+
+fn long_day(d: CivilDate) -> String {
+    format!("{} {} {}", title_case(DAYS[weekday(d) as usize]), d.d, title_case(MONTHS[(d.m as usize).clamp(1, 12) - 1]))
+}
+
+/// The viewer's top bar: "Today, 09:30", "Yesterday, 18:02",
+/// "Monday 23 Nov, 09:30", "Friday 21 Nov 2025, 09:30".
+pub fn short_when(ms: i64, utc_offset_s: i32, today: CivilDate) -> String {
+    let d = civil_from_ms(ms, utc_offset_s);
+    let (n, t) = (days_from_civil(d), days_from_civil(today));
+    let day = if n == t {
+        "Today".to_string()
+    } else if n == t - 1 {
+        "Yesterday".to_string()
+    } else if d.y == today.y {
+        long_day(d)
+    } else {
+        format!("{} {}", long_day(d), d.y)
+    };
+    format!("{day}, {}", clock(ms, utc_offset_s))
+}
+
+/// The INFO panel: "Thursday 26 Nov 2026, 09:30".
+pub fn full_when(ms: i64, utc_offset_s: i32) -> String {
+    let d = civil_from_ms(ms, utc_offset_s);
+    format!("{} {}, {}", long_day(d), d.y, clock(ms, utc_offset_s))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2026-11-26 09:30 UTC, in milliseconds.
+    const NOV26_0930: i64 = 1_795_685_400_000;
+
+    #[test]
+    fn viewer_dates() {
+        let today = date(2026, 11, 26);
+        assert_eq!(short_when(NOV26_0930, 0, today), "Today, 09:30");
+        // Jakarta is seven hours ahead.
+        assert_eq!(short_when(NOV26_0930, 7 * 3600, today), "Today, 16:30");
+        assert_eq!(short_when(NOV26_0930 - 86_400_000 + 3_600_000 * 8 + 60_000 * 32, 0, today), "Yesterday, 18:02");
+        assert_eq!(short_when(NOV26_0930 - 3 * 86_400_000, 0, today), "Monday 23 Nov, 09:30");
+        assert_eq!(short_when(NOV26_0930 - 370 * 86_400_000, 0, today), "Friday 21 Nov 2025, 09:30");
+        assert_eq!(full_when(NOV26_0930, 0), "Thursday 26 Nov 2026, 09:30");
+        assert_eq!(full_when(NOV26_0930 - 9 * 3_600_000 - 25 * 60_000, 0), "Thursday 26 Nov 2026, 00:05");
+    }
 
     fn date(y: i32, m: u8, d: u8) -> CivilDate {
         CivilDate { y, m, d }
