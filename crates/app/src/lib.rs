@@ -301,6 +301,17 @@ fn android_main(app: AndroidApp) {
             if let Some(v) = vsync.as_ref().filter(|_| sched.is_animating()) {
                 v.request();
             }
+            // The window changed size (folding, unfolding, rotating): build
+            // the surface afresh. Drawing on into the old one leaves the
+            // driver holding buffers of the old size as well as the new.
+            if let (Some(g), Some(w)) = (gfx.as_mut(), app.native_window()) {
+                if g.outgrown(&w) {
+                    if let Err(e) = g.resume(&w) {
+                        log::error!("GL surface rebuild failed: {e}");
+                    }
+                    frame_rate.apply(&w, vote);
+                }
+            }
             if let Some(g) = gfx.as_ref().filter(|g| g.has_surface()) {
                 let r = renderer.get_or_insert_with(|| {
                     let mut r = Renderer::new(g.gl());
@@ -605,8 +616,8 @@ fn on_text(state: &ImeState) {
 fn home_action(app: &AndroidApp, drawer: &mut Drawer, settings: &mut SettingsScreen, speed: f32, action: Action, now: Instant) {
     match action {
         Action::None => {}
-        Action::Launch(key) => {
-            let ok = apps::launch(app, &key);
+        Action::Launch(key, at) => {
+            let ok = apps::launch(app, &key, at);
             log::info!("launch {} -> {ok}", key.package);
         }
         Action::OpenNotifications => system::expand_notifications(app),
@@ -654,8 +665,8 @@ fn home_action(app: &AndroidApp, drawer: &mut Drawer, settings: &mut SettingsScr
 fn drawer_action(app: &AndroidApp, drawer: &mut Drawer, action: DrawerAction, now: Instant) {
     match action {
         DrawerAction::None => {}
-        DrawerAction::Launch(key) => {
-            let ok = apps::launch(app, &key);
+        DrawerAction::Launch(key, at) => {
+            let ok = apps::launch(app, &key, at);
             log::info!("launch {} -> {ok}", key.package);
             if ok {
                 drawer.launched();

@@ -45,7 +45,8 @@ pub struct Touch {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     None,
-    Launch(AppKey),
+    /// The app, and where its icon is on screen (for the opening zoom).
+    Launch(AppKey, Option<R4>),
     OpenNotifications,
     OpenAppList,
     OpenSearch,
@@ -666,6 +667,16 @@ impl Home {
         true
     }
 
+    /// Where the icon a tap landed on is drawn.
+    fn icon_on_screen(&self, t: Target) -> Option<R4> {
+        let (m, ..) = self.metrics?;
+        match t {
+            Target::Cell { col, row, .. } => Some(m.icon_rect(col, row)),
+            Target::Dock(i) => Some(m.dock_icon_rect(i)),
+            _ => None,
+        }
+    }
+
     fn panel(&self, apps: usize) -> Panel {
         let (m, _, insets, _) = self.metrics.expect("metrics before touches");
         let d = self.density;
@@ -880,7 +891,7 @@ impl Home {
                             _ => Action::None,
                         },
                         (Some(p), Some(now)) if p == now => match (p, self.item_at(p)) {
-                            (_, Some(Item::App(key))) => Action::Launch(key),
+                            (t, Some(Item::App(key))) => Action::Launch(key, self.icon_on_screen(t)),
                             (Target::Cell { page, col, row }, Some(Item::Folder(_))) => {
                                 self.mode = Mode::Folder(OpenFolder { page, col, row, renaming: None, pressed: None });
                                 Action::None
@@ -1061,7 +1072,8 @@ impl Home {
                         }
                         (FolderHit::App(i), false) => {
                             if let Some(Item::Folder(folder)) = self.layout.slot(f.page, f.col, f.row) {
-                                return folder.apps.get(i).cloned().map_or(Action::None, Action::Launch);
+                                let at = self.panel(folder.apps.len()).icon_rect(i);
+                                return folder.apps.get(i).cloned().map_or(Action::None, |k| Action::Launch(k, Some(at)));
                             }
                         }
                         (FolderHit::Name, true) => {
