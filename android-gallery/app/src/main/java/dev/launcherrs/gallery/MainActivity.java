@@ -256,6 +256,10 @@ public class MainActivity extends NativeActivity {
     public boolean readerAdvance(long us) { return FrameReader.advance(us); }
     public byte[] readerPlane(int i) { return FrameReader.plane(i); }
     public int[] readerInfo() { return FrameReader.info(); }
+    public boolean gifVideoStart(int fd, int w, int h, int fps, int bitRate) { return GifVideo.start(fd, w, h, fps, bitRate); }
+    public boolean gifVideoPut(byte[] yuv, long ptsUs) { return GifVideo.put(yuv, ptsUs); }
+    public String gifVideoFinish() { return GifVideo.finish(); }
+    public void gifVideoAbort() { GifVideo.abort(); }
     public void clipStrip(long id, int count, int height, int gen) { Frames.strip(this, id, count, height, gen); }
     public String clipRun(long id, long startUs, long endUs, boolean exact, boolean keepSound, int fd) {
         return Clipper.run(this, id, startUs, endUs, exact, keepSound, fd);

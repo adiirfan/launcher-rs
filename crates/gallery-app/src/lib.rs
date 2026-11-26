@@ -8,6 +8,8 @@ mod bars;
 mod gif_maker;
 mod gif_player;
 mod gif_screen;
+mod gif_to_video;
+mod save_video;
 mod photo_tex;
 mod video;
 mod viewer;
@@ -101,6 +103,8 @@ fn android_main(app: AndroidApp) {
     let mut convert: Option<convert_screen::ConvertScreen> = None;
     // Make a GIF; its "choose the part" step borrows the clip screen.
     let mut gif: Option<gif_screen::GifScreen> = None;
+    // "Save as video" for a GIF: a box over the viewer.
+    let mut save_vid: Option<save_video::SaveVideo> = None;
     let mut viewer_list_stale = false;
     // MOVE: the folder chooser and the items it's for; then the move
     // waiting for Android's yes; then a message for the grid.
@@ -252,6 +256,19 @@ fn android_main(app: AndroidApp) {
                 }
                 continue;
             }
+            if let Some(sv) = save_vid.as_mut() {
+                match sv.touch(t) {
+                    save_video::Action::None => {}
+                    save_video::Action::Close => save_vid = None,
+                    save_video::Action::Done(name) => {
+                        save_vid = None;
+                        if let Some(v) = viewer.as_mut() {
+                            v.toast(format!("Saved as {name}"));
+                        }
+                    }
+                }
+                continue;
+            }
             if let Some(v) = viewer.as_mut() {
                 let act = v.touch(t);
                 let item = |id: i64| photos.items().iter().find(|i| i.id == id).cloned();
@@ -292,7 +309,10 @@ fn android_main(app: AndroidApp) {
                                 v.release_video();
                                 clip = Some(clip_screen::ClipScreen::new(&app, photos_density(&app), it));
                             }
-                            _ => v.toast("Comes in the next step".into()),
+                            (viewer::EditKind::GifToVideo, Some(it)) => {
+                                save_vid = Some(save_video::SaveVideo::new(&app, photos_density(&app), it));
+                            }
+                            _ => v.toast("Couldn't find this item".into()),
                         }
                     }
                     viewer::Action::Favourite(id) => {
@@ -467,6 +487,15 @@ fn android_main(app: AndroidApp) {
             }
             sched.request_redraw();
         }
+        if let Some(sv) = save_vid.as_mut()
+            && let save_video::Action::Done(name) = sv.poll()
+        {
+            save_vid = None;
+            if let Some(v) = viewer.as_mut() {
+                v.toast(format!("Saved as {name}"));
+            }
+            sched.request_redraw();
+        }
         if let Some(c) = clip.as_mut()
             && let clip_screen::Action::Saved(name) = c.poll()
         {
@@ -506,6 +535,10 @@ fn android_main(app: AndroidApp) {
             } else if let Some(c) = crop.as_mut() {
                 if !c.back() {
                     closed_crops.extend(crop.take());
+                }
+            } else if let Some(sv) = save_vid.as_mut() {
+                if !sv.back() {
+                    save_vid = None;
                 }
             } else if move_pick.is_some() {
                 move_pick = None;
@@ -599,7 +632,7 @@ fn android_main(app: AndroidApp) {
         if holo_platform::update::take_changed() {
             sched.request_redraw();
         }
-        if crop.as_ref().is_some_and(|c| c.wants_frames()) || clip.as_ref().is_some_and(|c| c.wants_frames()) || convert.as_ref().is_some_and(|c| c.wants_frames()) || gif.as_ref().is_some_and(|g| g.wants_frames()) {
+        if crop.as_ref().is_some_and(|c| c.wants_frames()) || clip.as_ref().is_some_and(|c| c.wants_frames()) || convert.as_ref().is_some_and(|c| c.wants_frames()) || gif.as_ref().is_some_and(|g| g.wants_frames()) || save_vid.as_ref().is_some_and(|s| s.wants_frames()) {
             sched.request_redraw();
         }
         if thumbs.has_ready() || jobs.has_done() || video::frame_waiting() || actions::has_done() {
@@ -703,6 +736,11 @@ fn android_main(app: AndroidApp) {
                         closed.extend(viewer.take());
                     }
                 }
+                if viewer.is_none() {
+                    // The box belongs to the GIF on screen; a save already
+                    // running still finishes.
+                    save_vid = None;
+                }
                 let (anim, missing) = if let Some(c) = convert.as_mut() {
                     c.draw(g.gl(), r, &mut batch, frame, now)
                 } else if let Some(c) = clip.as_mut() {
@@ -715,7 +753,11 @@ fn android_main(app: AndroidApp) {
                     (c.draw(g.gl(), r, &mut batch, frame, now), Vec::new())
                 } else if let Some(v) = viewer.as_mut() {
                     let pd = photo_draw.get_or_insert_with(|| photo_tex::PhotoDraw::new(g.gl()));
-                    (v.draw(g.gl(), r, &mut batch, pd, &thumbs, &jobs, frame, now), Vec::new())
+                    let mut anim = v.draw(g.gl(), r, &mut batch, pd, &thumbs, &jobs, frame, now);
+                    if let Some(sv) = save_vid.as_mut() {
+                        anim |= sv.draw(g.gl(), r, &mut batch, frame, now);
+                    }
+                    (anim, Vec::new())
                 } else if let Some((picker, _)) = move_pick.as_mut() {
                     picker.set_items(photos.items().clone());
                     picker.draw(g.gl(), r, &mut batch, &thumbs, frame, now)

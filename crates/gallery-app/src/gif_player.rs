@@ -10,8 +10,6 @@ use std::time::Duration;
 
 use holo_platform::waker;
 
-/// Browsers treat shorter delays (often written as 0) as this.
-const MIN_DELAY: Duration = Duration::from_millis(20);
 /// Larger canvases are not played (a frame alone would be over 64 MB).
 const MAX_PIXELS: usize = 4096 * 4096;
 
@@ -26,7 +24,7 @@ pub struct GifPlayer {
     pub h: u32,
 }
 
-fn open(bytes: &[u8]) -> Result<gif::Decoder<Cursor<&[u8]>>, gif::DecodingError> {
+pub(crate) fn open(bytes: &[u8]) -> Result<gif::Decoder<Cursor<&[u8]>>, gif::DecodingError> {
     let mut opts = gif::DecodeOptions::new();
     opts.set_color_output(gif::ColorOutput::RGBA);
     opts.read_info(Cursor::new(bytes))
@@ -54,7 +52,8 @@ impl GifPlayer {
                         frames += 1;
                         let saved = (f.dispose == gif::DisposalMethod::Previous).then(|| canvas.clone());
                         draw(&mut canvas, w, f);
-                        let delay = Duration::from_millis(f.delay as u64 * 10).max(MIN_DELAY);
+                        // Shown the way browsers do (and as "Save as video" saves it).
+                        let delay = Duration::from_millis(gallery_core::gif_video::delay_ms(f.delay));
                         if tx.send(Frame { rgba: canvas.clone(), delay }).is_err() {
                             return;
                         }
@@ -86,7 +85,7 @@ impl GifPlayer {
 }
 
 /// Opaque pixels of `f` over the canvas; see-through ones leave it be.
-fn draw(canvas: &mut [u8], w: u32, f: &gif::Frame) {
+pub(crate) fn draw(canvas: &mut [u8], w: u32, f: &gif::Frame) {
     let (fl, ft, fw) = (f.left as usize, f.top as usize, f.width as usize);
     let cw = w as usize;
     let ch = canvas.len() / 4 / cw;
@@ -106,7 +105,7 @@ fn draw(canvas: &mut [u8], w: u32, f: &gif::Frame) {
     }
 }
 
-fn clear(canvas: &mut [u8], w: u32, f: &gif::Frame) {
+pub(crate) fn clear(canvas: &mut [u8], w: u32, f: &gif::Frame) {
     let cw = w as usize;
     let ch = canvas.len() / 4 / cw;
     for y in f.top as usize..(f.top as usize + f.height as usize).min(ch) {
