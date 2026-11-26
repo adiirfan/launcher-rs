@@ -1,0 +1,23 @@
+[package]
+name = "holo-platform"
+edition.workspace = true
+version.workspace = true
+
+# Android glue shared by the launcher and the gallery: the GL surface,
+# refresh timing, fonts, the one-draw-call renderer, the waker and JNI help.
+
+[dependencies]
+launcher-core = { path = "../core" }
+launcher-draw = { path = "../draw" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6.1", features = ["native-activity"] }
+ndk = "0.9"
+khronos-egl = { version = "6", features = ["static", "no-pkg-config"] }
+glow = "0.18"
+jni = "0.22"
+libc = "0.2"
+log = "0.4"
+memmap2 = "0.9"
+ab_glyph = "0.2.32"
+bytemuck = "1"

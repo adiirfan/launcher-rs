@@ -1,29 +1,24 @@
 //! The launcher's Android entry point. Everything here is Android-only.
 #![cfg(target_os = "android")]
 
-mod gl_surface;
-mod render;
-mod jni_util;
 mod apps;
 mod cache;
 mod calendar;
 mod contacts;
 mod drawer;
 mod folder;
-mod fonts;
-mod holo;
 mod home;
 mod icons;
 mod menu;
 mod settings_pages;
 mod settings_screen;
-mod refresh;
 mod keyboard;
+// Shared with the gallery; re-exported so `crate::render` and friends still work.
+pub(crate) use holo_platform::{fonts, gl_surface, holo, jni_util, refresh, render, vsync};
 mod listener;
 mod lookup;
 mod update;
 mod system;
-mod vsync;
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -323,7 +318,7 @@ fn android_main(app: AndroidApp) {
             }
             if let Some(g) = gfx.as_ref().filter(|g| g.has_surface()) {
                 let r = renderer.get_or_insert_with(|| {
-                    let mut r = Renderer::new(g.gl());
+                    let mut r = Renderer::new(g.gl(), render::RendererConfig::LAUNCHER);
                     r.set_glyph_budget(Duration::from_nanos(frame_rate.period_ns() as u64 / 5));
                     r
                 });

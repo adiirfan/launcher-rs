@@ -5,7 +5,7 @@ use std::sync::Mutex;
 
 use std::time::{Duration, Instant};
 
-use android_activity::{AndroidApp, AndroidAppWaker};
+use android_activity::AndroidApp;
 use jni::objects::{JClass, JString, JValue};
 use jni::sys::jint;
 use jni::{EnvUnowned, jni_sig, jni_str};
@@ -19,15 +19,10 @@ static ACTION: Mutex<bool> = Mutex::new(false);
 static HOME: Mutex<bool> = Mutex::new(false);
 static PERMISSION: Mutex<Option<(i32, bool)>> = Mutex::new(None);
 static TRIM: Mutex<Option<i32>> = Mutex::new(None);
-/// Wakes the current main loop. Android can rebuild the activity inside the
-/// same process (a font or language change, sometimes after a long sleep);
-/// the new loop then replaces this, or text and Home would wake a loop
-/// that no longer exists.
-static WAKER: Mutex<Option<AndroidAppWaker>> = Mutex::new(None);
 
 /// Call at the start of every main loop so keyboard events can wake it.
 pub fn init(app: &AndroidApp) {
-    *WAKER.lock().unwrap() = Some(app.create_waker());
+    holo_platform::waker::init(app);
 }
 
 pub fn show(app: &AndroidApp, show: bool) {
@@ -106,9 +101,7 @@ pub fn take_action() -> bool {
 }
 
 pub(crate) fn wake() {
-    if let Some(w) = WAKER.lock().unwrap().as_ref() {
-        w.wake();
-    }
+    holo_platform::waker::wake();
 }
 
 #[unsafe(no_mangle)]

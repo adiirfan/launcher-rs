@@ -13,13 +13,26 @@ use launcher_draw::slots::SlotPool;
 use launcher_draw::text::layout_line;
 use launcher_draw::{Rect, Rgba};
 
-/// Icon atlas: starts 2048×1024 (about 72 home-size icons) and grows
-/// taller to hold every app on phones with more, so no icon is ever
-/// pushed out and drawn grey while scrolling.
-const ICON_ATLAS: (u32, u32) = (2048, 1024);
-/// Never taller than this (4096 is safe on every OpenGL ES 3 phone).
-const ICON_ATLAS_MAX_H: u32 = 4096;
-const GLYPH_ATLAS: (u32, u32) = (1024, 1024);
+/// Texture sizes, set by each app.
+#[derive(Clone, Copy, Debug)]
+pub struct RendererConfig {
+    /// Picture atlas (icons, thumbnails): its starting size. It grows
+    /// taller, up to `image_atlas_max_h`, when asked to hold more.
+    pub image_atlas: (u32, u32),
+    pub image_atlas_max_h: u32,
+    pub glyph_atlas: (u32, u32),
+}
+
+impl RendererConfig {
+    /// Starts 2048×1024 (about 72 home-size icons) and grows to hold every
+    /// app, so no icon is pushed out and drawn grey while scrolling. 4096 is
+    /// safe on every OpenGL ES 3 phone.
+    pub const LAUNCHER: RendererConfig =
+        RendererConfig { image_atlas: (2048, 1024), image_atlas_max_h: 4096, glyph_atlas: (1024, 1024) };
+    /// 96 thumbnail slots of 256 px (24 MB), fixed.
+    pub const GALLERY: RendererConfig =
+        RendererConfig { image_atlas: (2048, 3072), image_atlas_max_h: 3072, glyph_atlas: (1024, 1024) };
+}
 
 const VS: &str = r#"#version 300 es
 layout(location = 0) in vec4 a_rect;
@@ -159,8 +172,9 @@ pub struct Renderer {
     icons: Atlas,
     /// Icon slots inside `icons`; sized by the first icon drawn.
     icon_slots: Option<SlotPool>,
-    /// Current height of the icon atlas (its width stays ICON_ATLAS.0).
+    /// Current height of the icon atlas (its width stays cfg.image_atlas.0).
     icon_h: u32,
+    cfg: RendererConfig,
     glyphs: Atlas,
     glyph_keys: HashMap<(char, u32, Weight), Option<GlyphSlot>>,
     /// One set per weight, loaded the first time that weight is drawn.
@@ -175,7 +189,7 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(gl: &glow::Context) -> Renderer {
+    pub fn new(gl: &glow::Context, cfg: RendererConfig) -> Renderer {
         unsafe {
             let program = gl.create_program().expect("program");
             for (kind, src) in [(glow::VERTEX_SHADER, VS), (glow::FRAGMENT_SHADER, FS)] {
@@ -211,10 +225,11 @@ impl Renderer {
                 program,
                 vao,
                 vbo,
-                icons: Atlas::new(gl, glow::RGBA8, glow::RGBA, ICON_ATLAS),
-                glyphs: Atlas::new(gl, glow::R8, glow::RED, GLYPH_ATLAS),
+                icons: Atlas::new(gl, glow::RGBA8, glow::RGBA, cfg.image_atlas),
+                glyphs: Atlas::new(gl, glow::R8, glow::RED, cfg.glyph_atlas),
                 icon_slots: None,
-                icon_h: ICON_ATLAS.1,
+                icon_h: cfg.image_atlas.1,
+                cfg,
                 glyph_keys: HashMap::new(),
                 // Regular is needed by every screen (and for line heights): load it now.
                 fonts: [None, Some(fonts::load_weight(Weight::Regular)), None, None],
@@ -268,7 +283,7 @@ impl Renderer {
     }
 
     fn slot_uv(&self, (x, y): (u32, u32), size: u32) -> [f32; 4] {
-        let (sw, sh) = (ICON_ATLAS.0 as f32, self.icon_h as f32);
+        let (sw, sh) = (self.cfg.image_atlas.0 as f32, self.icon_h as f32);
         [x as f32 / sw, y as f32 / sh, (x + size) as f32 / sw, (y + size) as f32 / sh]
     }
 
@@ -286,14 +301,14 @@ impl Renderer {
         if px == 0 || self.icon_slots.as_ref().is_some_and(|p| p.slot_size() != px) {
             return;
         }
-        let need = SlotPool::height_for(ICON_ATLAS.0, count, px).min(ICON_ATLAS_MAX_H);
+        let need = SlotPool::height_for(self.cfg.image_atlas.0, count, px).min(self.cfg.image_atlas_max_h);
         if need <= self.icon_h {
             return;
         }
-        let w = ICON_ATLAS.0 as i32;
+        let w = self.cfg.image_atlas.0 as i32;
         unsafe {
             let old = self.icons.tex;
-            let new = Atlas::new(gl, glow::RGBA8, glow::RGBA, (ICON_ATLAS.0, need)).tex;
+            let new = Atlas::new(gl, glow::RGBA8, glow::RGBA, (self.cfg.image_atlas.0, need)).tex;
             // Copy the old pixels across through a framebuffer that reads the old texture.
             let fbo = gl.create_framebuffer().expect("framebuffer");
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(fbo));
@@ -305,7 +320,7 @@ impl Renderer {
             gl.delete_texture(old);
             self.icons.tex = new;
         }
-        log::info!("icon atlas grown {}x{} -> {}x{need} for {count} icons", ICON_ATLAS.0, self.icon_h, ICON_ATLAS.0);
+        log::info!("icon atlas grown {}x{} -> {}x{need} for {count} icons", self.cfg.image_atlas.0, self.icon_h, self.cfg.image_atlas.0);
         self.icon_h = need;
         if let Some(p) = self.icon_slots.as_mut() {
             p.grow(need);
@@ -333,7 +348,7 @@ impl Renderer {
             return None;
         }
         if self.icon_slots.as_ref().is_none_or(|p| p.slot_size() != w) {
-            let pool = SlotPool::new(ICON_ATLAS.0, self.icon_h, w);
+            let pool = SlotPool::new(self.cfg.image_atlas.0, self.icon_h, w);
             log::info!("icon slots: {} of {w}px", pool.capacity());
             self.icon_slots = Some(pool);
         }

@@ -25,6 +25,10 @@ pub const DATE: u32 = 0xE0E0E0;
 pub const QUIET: u32 = 0xBDBDBD;
 pub const DIVIDER: u32 = 0x2A2A2A;
 pub const ROW_LINE: u32 = 0x262626;
+/// Secondary text under a row title.
+pub const TEXT_QUIET: u32 = 0x9E9E9E;
+/// Action bar background.
+pub const BAR: u32 = 0x141414;
 
 /// A magnifying glass centred on (cx, cy), about 22 dp across.
 pub fn magnifier(batch: &mut Batch, cx: f32, cy: f32, d: f32, color: Rgba) {
