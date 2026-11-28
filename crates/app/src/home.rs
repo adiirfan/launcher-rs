@@ -494,6 +494,14 @@ impl Home {
         self.pager.snap_to(0, now);
     }
 
+    /// Returning to Home from another app: land on the first page right away
+    /// so we don't play a sideways slide during the system transition.
+    pub fn jump_to_first_page(&mut self, now: Instant) {
+        self.pressed = None;
+        self.close(now);
+        self.pager.jump_to(0);
+    }
+
     /// Back: close the menu or folder. A name being typed is saved.
     pub fn back(&mut self, now: Instant) -> Action {
         let renaming = self.renaming();

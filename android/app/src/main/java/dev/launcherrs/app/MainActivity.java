@@ -105,9 +105,9 @@ public class MainActivity extends NativeActivity {
     @Override public void onTrimMemory(int level) {
         super.onTrimMemory(level);
         onTrim(level);
-        // Android's icon pictures from the app list wait for a Java clean-up
-        // before their memory is returned; while hidden, do it now.
-        if (level >= TRIM_MEMORY_UI_HIDDEN) System.gc();
+        // Only force a Java GC under real background memory pressure, not on
+        // every normal switch to another app (TRIM_MEMORY_UI_HIDDEN = 20).
+        if (level >= TRIM_MEMORY_BACKGROUND) System.gc();
     }
 
     /** Home pressed while we're already Home. */
@@ -159,8 +159,10 @@ public class MainActivity extends NativeActivity {
 
     public void openListenerSettings() {
         runOnUiThread(() -> {
-            try { startActivity(new Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS")); }
-            catch (RuntimeException e) { /* no such page on this phone */ }
+            try {
+                startActivity(new Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS")
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            } catch (RuntimeException e) { /* no such page on this phone */ }
         });
     }
 
@@ -291,7 +293,8 @@ public class MainActivity extends NativeActivity {
     public void pickWallpaper() {
         runOnUiThread(() -> {
             try {
-                startActivity(Intent.createChooser(new Intent(Intent.ACTION_SET_WALLPAPER), null));
+                startActivity(Intent.createChooser(new Intent(Intent.ACTION_SET_WALLPAPER), null)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             } catch (RuntimeException e) { /* nothing on the phone offers wallpapers */ }
         });
     }

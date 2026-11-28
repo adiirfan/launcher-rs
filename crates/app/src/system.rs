@@ -90,9 +90,11 @@ pub fn expand_notifications(app: &AndroidApp) {
 /// Start an activity for `action` (with optional data URI). False if
 /// nothing on the phone handles it.
 pub fn start(app: &AndroidApp, action: &str, data: Option<&str>) -> bool {
+    const FLAG_ACTIVITY_NEW_TASK: i32 = 0x1000_0000;
     let result = with_activity(app, |env, activity| {
         let action = env.new_string(action)?;
         let intent = env.new_object(jni_str!("android/content/Intent"), jni_sig!("(Ljava/lang/String;)V"), &[JValue::Object(&action)])?;
+        env.call_method(&intent, jni_str!("addFlags"), jni_sig!("(I)Landroid/content/Intent;"), &[JValue::Int(FLAG_ACTIVITY_NEW_TASK)])?;
         if let Some(data) = data {
             let s = env.new_string(data)?;
             let uri = env

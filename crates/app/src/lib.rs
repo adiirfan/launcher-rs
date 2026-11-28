@@ -74,9 +74,11 @@ fn android_main(app: AndroidApp) {
     let store = cache::Store::open(&app);
     let mut home = Home::load(&app, store.clone());
     let mut icons = Icons::new(store);
+    icons.start(&app);
     let mut drawer = Drawer::new(app.config().density().unwrap_or(160) as f32 / 160.0);
     let mut settings = SettingsScreen::new(app.config().density().unwrap_or(160) as f32 / 160.0);
     let mut first_frame = true;
+    let mut surface_fresh = false;
     let mut last_insets: Option<Insets> = None;
     let mut needs_refresh = true;
     let mut visible = true;
@@ -110,13 +112,15 @@ fn android_main(app: AndroidApp) {
         if visible {
             timeout = timeout.min(until_next_minute());
         }
+        let has_surface = gfx.as_ref().is_some_and(GlSurface::has_surface);
         let frame_wake = match &vsync {
-            Some(v) if sched.should_draw(now) => {
+            Some(v) if has_surface && sched.should_draw(now) => {
                 v.request();
                 let since = *waiting_since.get_or_insert(now);
                 Some(VSYNC_FALLBACK.saturating_sub(now.duration_since(since)))
             }
-            _ => sched.next_wake(now),
+            _ if has_surface => sched.next_wake(now),
+            _ => None,
         };
         let timeout = [frame_wake, background.then_some(Duration::ZERO), policy.next_check(now), home.next_wake(now), drawer.next_wake(now)]
             .into_iter()
@@ -135,6 +139,7 @@ fn android_main(app: AndroidApp) {
                             if let Err(e) = result {
                                 log::error!("GL setup failed: {e}");
                             }
+                            surface_fresh = true;
                             sched.request_redraw();
                             // A new surface starts with no vote: re-apply ours.
                             frame_rate.apply(&window, vote);
@@ -144,25 +149,56 @@ fn android_main(app: AndroidApp) {
                         if let Some(g) = gfx.as_mut() {
                             g.suspend();
                         }
+                        surface_fresh = false;
                     }
                     MainEvent::Resume { .. } => {
                         visible = true;
                         drawer.shown_again();
                         needs_refresh = true;
                         drawer.recheck_permission();
+                        let m = current_minute();
+                        if m != minute {
+                            minute = m;
+                            home.update_clock(&app);
+                        }
                         sched.request_redraw();
                     }
                     MainEvent::Pause => visible = false,
                     MainEvent::Stop => {
+                        visible = false;
                         // Whatever app opened now covers us: put Home back
                         // behind it, ready for when the user returns.
                         if drawer.hidden(Instant::now()) {
                             keyboard::clear_text(&app);
+                        }
+                    }
+                    MainEvent::RedrawNeeded { .. } => {
+                        // Draw synchronously before returning to NativeActivity so
+                        // WindowManager never transitions onto an empty surface.
+                        let now = Instant::now();
+                        let style = home.settings();
+                        drawer.set_style(style.animations.factor(), style.glow);
+                        if keyboard::take_home() {
+                            handle_home_intent(&app, &mut home, &mut drawer, &mut settings, style.animations.factor(), surface_fresh, now);
+                        }
+                        let m = current_minute();
+                        if m != minute {
+                            minute = m;
+                            home.update_clock(&app);
+                        }
+                        if gfx.as_ref().is_some_and(GlSurface::has_surface) {
+                            waiting_since = None;
+                            draw_frame(
+                                &app, &mut gfx, &mut renderer, &mut batch, &mut home, &mut icons,
+                                &mut drawer, &mut settings, &frame_rate, vote, &mut last_insets,
+                                &mut first_frame, &mut surface_fresh, &mut timings, &mut frames,
+                                None, &mut moving_tick, &mut sched, now,
+                            );
+                        } else {
                             sched.request_redraw();
                         }
                     }
                     MainEvent::WindowResized { .. }
-                    | MainEvent::RedrawNeeded { .. }
                     | MainEvent::ContentRectChanged { .. }
                     | MainEvent::ConfigChanged { .. } => sched.request_redraw(),
                     MainEvent::Destroy => quit = true,
@@ -216,16 +252,12 @@ fn android_main(app: AndroidApp) {
             sched.request_redraw();
         }
         if keyboard::take_home() {
-            if settings.is_open() {
-                settings.close(now, speed);
-            } else if drawer.is_open() {
-                drawer_action(&app, &mut drawer, DrawerAction::Close, now);
-            } else {
-                if home.renaming() {
-                    home_action(&app, &mut drawer, &mut settings, speed, home::Action::EndRename, now);
-                }
-                home.go_to_first_page(now);
-            }
+            handle_home_intent(&app, &mut home, &mut drawer, &mut settings, speed, surface_fresh, now);
+            sched.request_redraw();
+        }
+        if let (Some(g), Some(r)) = (gfx.as_ref().filter(|g| g.has_surface()), renderer.as_mut())
+            && icons.drain_ready(g.gl(), r)
+        {
             sched.request_redraw();
         }
         if update::take_changed() {
@@ -260,16 +292,22 @@ fn android_main(app: AndroidApp) {
             sched.request_redraw();
         }
 
-        // Android wants memory back while another app is in front (20 is
-        // "UI hidden"). Home's icons stay, so pressing Home is still instant.
+        // Android sends TRIM_MEMORY_UI_HIDDEN (20) on every normal app switch.
+        // Only drop glyphs and warm caches under real background pressure (40+),
+        // so returning to Home never has to re-rasterise text or re-read icons.
         if let Some(level) = keyboard::take_trim() {
             log::info!("trim memory level {level}, visible {visible}");
-            if level >= 20 && !visible {
+            if level >= 40 && !visible {
                 drawer.trim();
                 icons.trim();
                 warmed = false;
                 if let Some(r) = renderer.as_mut() {
                     r.trim_glyphs();
+                }
+                purge_freed_memory();
+            } else if level >= 20 && !visible {
+                if let Some(r) = renderer.as_mut() {
+                    icons.trim_uploaded(r);
                 }
                 purge_freed_memory();
             }
@@ -292,7 +330,8 @@ fn android_main(app: AndroidApp) {
         let now = Instant::now();
         // A refresh that came while nothing needed drawing is simply dropped.
         let tick = vsync.as_ref().and_then(|v| v.take_tick());
-        let on_beat = vsync.is_none()
+        let on_beat = surface_fresh
+            || vsync.is_none()
             || tick.is_some()
             || waiting_since.is_some_and(|t| now.duration_since(t) >= VSYNC_FALLBACK);
         if sched.should_draw(now) && on_beat {
@@ -300,113 +339,25 @@ fn android_main(app: AndroidApp) {
                 log::info!("slow wait: wanted a frame for {:.0} ms", w.as_secs_f64() * 1e3);
             }
             waiting_since = None;
-            // Set when this frame left something for the next one.
-            let mut again = false;
             // Ask for the next refresh now, so a long frame can't lose it.
             if let Some(v) = vsync.as_ref().filter(|_| sched.is_animating()) {
                 v.request();
             }
-            // The window changed size (folding, unfolding, rotating): build
-            // the surface afresh. Drawing on into the old one leaves the
-            // driver holding buffers of the old size as well as the new.
-            if let (Some(g), Some(w)) = (gfx.as_mut(), app.native_window()) {
-                if g.outgrown(&w) {
-                    if let Err(e) = g.resume(&w) {
-                        log::error!("GL surface rebuild failed: {e}");
-                    }
-                    frame_rate.apply(&w, vote);
-                }
-            }
-            if let Some(g) = gfx.as_ref().filter(|g| g.has_surface()) {
-                let r = renderer.get_or_insert_with(|| {
-                    let mut r = Renderer::new(g.gl(), render::RendererConfig::LAUNCHER);
-                    r.set_glyph_budget(Duration::from_nanos(frame_rate.period_ns() as u64 / 5));
-                    r
-                });
-                let t0 = Instant::now();
-                r.begin_frame();
-                batch.clear();
-                let screen = g.size();
-                let ins = insets(&app, screen, &mut last_insets);
-                icons.begin_frame(r);
-                // Room for every app (plus a row for new installs), so
-                // scrolling never pushes an icon out.
-                r.reserve_icons(g.gl(), home.apps().0.len() + 12, icons.size());
-                let mut moving = false;
-                if !drawer.covers_home(now) && !settings.covers_home(now) {
-                    moving |= home.draw(g.gl(), r, &mut batch, &mut icons, screen, ins, now);
-                }
-                moving |= drawer.draw(g.gl(), r, &mut batch, &mut icons, home.apps(), home.dots(), screen, ins, now);
-                moving |= settings.draw(g.gl(), r, &mut batch, &mut icons, &home, screen, ins, now);
-                let built = t0.elapsed();
-                r.draw(g.gl(), &batch, screen);
-                let submitted = t0.elapsed();
-                if submitted > SLOW {
-                    let ms = |d: Duration| d.as_secs_f64() * 1e3;
-                    log::info!(
-                        "slow frame: build {:.1} ms (icons {} in {:.1}, glyphs {:.1}, fonts {:.1}), submit {:.1} ms",
-                        ms(built), icons.decoded, ms(icons.spent), ms(r.spent_glyphs), ms(r.spent_fonts), ms(submitted - built)
-                    );
-                }
-                let swap_t = Instant::now();
-                if let Err(e) = g.swap() {
-                    log::error!("swap failed: {e}");
-                }
-                if swap_t.elapsed() > Duration::from_millis(100) {
-                    log::info!("slow swap: {:.0} ms handing the frame to the screen", swap_t.elapsed().as_secs_f64() * 1e3);
-                }
-                // Something kept moving, yet a refresh went by with no frame.
-                if let (Some(t), Some(prev)) = (tick, moving_tick)
-                    && t - prev > frame_rate.period_ns() * 3 / 2
-                {
-                    log::info!("slow beat: {:.1} ms between moving frames", (t - prev) as f64 / 1e6);
-                }
-                // Mid-movement and done later than one refresh after its
-                // own: shown a refresh late. (The first frame after idle is
-                // left out: on screens that slow right down when still, its
-                // refresh time says little.)
-                if let Some(t) = tick.filter(|_| moving_tick.is_some()) {
-                    let late = monotonic_ns(libc::CLOCK_MONOTONIC) - t;
-                    if late > frame_rate.period_ns() {
-                        log::info!("slow beat: frame done {:.1} ms after its refresh", late as f64 / 1e6);
-                    }
-                }
-                timings.push(t0.elapsed());
-                if timings.len() == 10 {
-                    let worst = timings.iter().max().unwrap();
-                    let avg = timings.iter().sum::<Duration>() / 10;
-                    log::info!("frame time over 10: avg {:.2} ms, worst {:.2} ms",
-                        avg.as_secs_f64() * 1e3, worst.as_secs_f64() * 1e3);
-                    timings.clear();
-                }
-                if first_frame {
-                    first_frame = false;
-                    log::info!("first frame: {:.0} ms after process start", ms_since_process_start());
-                    purge_freed_memory();
-                }
-                if moving {
-                    sched.animate_until(now + ANIM_STEP);
-                }
-                again = r.wants_redraw() || icons.deferred();
-                frames += 1;
-            }
-            sched.frame_drawn(now);
-            // After frame_drawn, which clears requests made before it.
-            if again {
-                sched.request_redraw();
-            }
-            // Still moving after this frame: the next one is due next refresh.
-            moving_tick = tick.filter(|_| sched.is_animating());
+            draw_frame(
+                &app, &mut gfx, &mut renderer, &mut batch, &mut home, &mut icons,
+                &mut drawer, &mut settings, &frame_rate, vote, &mut last_insets,
+                &mut first_frame, &mut surface_fresh, &mut timings, &mut frames,
+                tick, &mut moving_tick, &mut sched, now,
+            );
         }
 
-        // Slow work goes after a frame is on screen, never before.
-        if !first_frame {
+        // Slow work goes after a frame is on screen, never before (including
+        // while resuming from another app before InitWindow/RedrawNeeded draw).
+        let frame_shown = !first_frame && !surface_fresh && gfx.as_ref().is_some_and(GlSurface::has_surface);
+        if frame_shown {
             // Loading ahead, only while nothing moves and the launcher is in front.
             background = false;
             if visible && !sched.should_draw(now) && !sched.is_animating() {
-                if icons.load_missing(&app) {
-                    sched.request_redraw();
-                }
                 if !warmed
                     && let (Some(g), Some(r)) = (gfx.as_ref().filter(|g| g.has_surface()), renderer.as_mut())
                 {
@@ -421,7 +372,8 @@ fn android_main(app: AndroidApp) {
                     log::info!("fonts and settings text ready in {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
                 }
                 let keys = home.apps().0.iter().map(|a| &a.key);
-                background = icons.warm(keys, Duration::from_millis(4)) || icons.has_missing();
+                background = icons.warm(keys, Duration::from_millis(4));
+                icons.prefetch_missing(home.apps().0.iter().map(|a| &a.key));
                 if !background
                     && let (Some(g), Some(r)) = (gfx.as_ref().filter(|g| g.has_surface()), renderer.as_mut())
                 {
@@ -473,6 +425,169 @@ fn android_main(app: AndroidApp) {
         }
     }
     log::info!("android_main end");
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_home_intent(
+    app: &AndroidApp,
+    home: &mut Home,
+    drawer: &mut Drawer,
+    settings: &mut SettingsScreen,
+    speed: f32,
+    instant: bool,
+    now: Instant,
+) {
+    if settings.is_open() {
+        settings.close(now, if instant { 0.0 } else { speed });
+    } else if drawer.is_open() {
+        if instant {
+            drawer.close(now, false);
+            keyboard::show(app, false);
+            keyboard::clear_text(app);
+        } else {
+            drawer_action(app, drawer, DrawerAction::Close, now);
+        }
+    } else {
+        if home.renaming() {
+            home_action(app, drawer, settings, speed, home::Action::EndRename, now);
+        }
+        if instant {
+            home.jump_to_first_page(now);
+        } else {
+            home.go_to_first_page(now);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_frame(
+    app: &AndroidApp,
+    gfx: &mut Option<GlSurface>,
+    renderer: &mut Option<Renderer>,
+    batch: &mut Batch,
+    home: &mut Home,
+    icons: &mut Icons,
+    drawer: &mut Drawer,
+    settings: &mut SettingsScreen,
+    frame_rate: &refresh::FrameRate,
+    vote: RateVote,
+    last_insets: &mut Option<Insets>,
+    first_frame: &mut bool,
+    surface_fresh: &mut bool,
+    timings: &mut Vec<Duration>,
+    frames: &mut u32,
+    tick: Option<i64>,
+    moving_tick: &mut Option<i64>,
+    sched: &mut FrameScheduler,
+    now: Instant,
+) {
+    let mut again = false;
+    // The window changed size (folding, unfolding, rotating): build
+    // the surface afresh. Drawing on into the old one leaves the
+    // driver holding buffers of the old size as well as the new.
+    if let (Some(g), Some(w)) = (gfx.as_mut(), app.native_window()) {
+        if g.outgrown(&w) {
+            if let Err(e) = g.resume(&w) {
+                log::error!("GL surface rebuild failed: {e}");
+            }
+            *surface_fresh = true;
+            frame_rate.apply(&w, vote);
+        }
+    }
+    if let Some(g) = gfx.as_ref().filter(|g| g.has_surface()) {
+        let r = renderer.get_or_insert_with(|| {
+            let mut r = Renderer::new(g.gl(), render::RendererConfig::LAUNCHER);
+            r.set_glyph_budget(Duration::from_nanos(frame_rate.period_ns() as u64 / 5));
+            r
+        });
+        r.reserve_icons(g.gl(), home.apps().0.len() + 12, icons.size());
+        icons.drain_ready(g.gl(), r);
+        // On a brand-new or resumed surface, render every visible glyph and
+        // cached icon in one go so Frame 0 never pops in text or grey boxes.
+        let complete = *first_frame || *surface_fresh;
+        let saved_glyph_budget = complete.then(|| r.set_glyph_budget(Duration::MAX));
+        let saved_icon_budget = complete.then(|| icons.set_frame_budget(Duration::MAX));
+
+        let t0 = Instant::now();
+        r.begin_frame();
+        batch.clear();
+        let screen = g.size();
+        let ins = insets(app, screen, last_insets);
+        icons.begin_frame(r);
+        let mut moving = false;
+        if !drawer.covers_home(now) && !settings.covers_home(now) {
+            moving |= home.draw(g.gl(), r, batch, icons, screen, ins, now);
+        }
+        moving |= drawer.draw(g.gl(), r, batch, icons, home.apps(), home.dots(), screen, ins, now);
+        moving |= settings.draw(g.gl(), r, batch, icons, home, screen, ins, now);
+        let built = t0.elapsed();
+        r.draw(g.gl(), batch, screen);
+        let submitted = t0.elapsed();
+
+        if let Some(b) = saved_glyph_budget {
+            r.set_glyph_budget(b);
+        }
+        if let Some(b) = saved_icon_budget {
+            icons.set_frame_budget(b);
+        }
+
+        if submitted > SLOW {
+            let ms = |d: Duration| d.as_secs_f64() * 1e3;
+            log::info!(
+                "slow frame: build {:.1} ms (icons {} in {:.1}, glyphs {:.1}, fonts {:.1}), submit {:.1} ms",
+                ms(built), icons.decoded, ms(icons.spent), ms(r.spent_glyphs), ms(r.spent_fonts), ms(submitted - built)
+            );
+        }
+        let swap_t = Instant::now();
+        if let Err(e) = g.swap() {
+            log::error!("swap failed: {e}");
+        }
+        if swap_t.elapsed() > Duration::from_millis(100) {
+            log::info!("slow swap: {:.0} ms handing the frame to the screen", swap_t.elapsed().as_secs_f64() * 1e3);
+        }
+        // Something kept moving, yet a refresh went by with no frame.
+        if let (Some(t), Some(prev)) = (tick, *moving_tick)
+            && t - prev > frame_rate.period_ns() * 3 / 2
+        {
+            log::info!("slow beat: {:.1} ms between moving frames", (t - prev) as f64 / 1e6);
+        }
+        // Mid-movement and done later than one refresh after its
+        // own: shown a refresh late. (The first frame after idle is
+        // left out: on screens that slow right down when still, its
+        // refresh time says little.)
+        if let Some(t) = tick.filter(|_| moving_tick.is_some()) {
+            let late = monotonic_ns(libc::CLOCK_MONOTONIC) - t;
+            if late > frame_rate.period_ns() {
+                log::info!("slow beat: frame done {:.1} ms after its refresh", late as f64 / 1e6);
+            }
+        }
+        timings.push(t0.elapsed());
+        if timings.len() == 10 {
+            let worst = timings.iter().max().unwrap();
+            let avg = timings.iter().sum::<Duration>() / 10;
+            log::info!("frame time over 10: avg {:.2} ms, worst {:.2} ms",
+                avg.as_secs_f64() * 1e3, worst.as_secs_f64() * 1e3);
+            timings.clear();
+        }
+        if *first_frame {
+            *first_frame = false;
+            log::info!("first frame: {:.0} ms after process start", ms_since_process_start());
+            purge_freed_memory();
+        }
+        *surface_fresh = false;
+        if moving {
+            sched.animate_until(now + ANIM_STEP);
+        }
+        again = r.wants_redraw() || icons.deferred();
+        *frames += 1;
+    }
+    sched.frame_drawn(now);
+    // After frame_drawn, which clears requests made before it.
+    if again {
+        sched.request_redraw();
+    }
+    // Still moving after this frame: the next one is due next refresh.
+    *moving_tick = tick.filter(|_| sched.is_animating());
 }
 
 /// Space the status and navigation bars take, from the window's content

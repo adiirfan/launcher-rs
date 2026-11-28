@@ -208,7 +208,8 @@ impl Pager {
         let from = self.offset(t);
         self.drag = None;
         self.page = page.min(self.pages - 1);
-        self.snap = Some(Snap { from, start: t });
+        let rest = self.page as f32 * self.page_w;
+        self.snap = ((from - rest).abs() > 0.5 && !self.snap_time.is_zero()).then_some(Snap { from, start: t });
     }
 
     pub fn touch_cancel(&mut self, t: Instant) {
@@ -349,6 +350,16 @@ mod tests {
         assert_eq!(p.offset(ms(t0, 1300)), 0.0);
         p.snap_to(9, ms(t0, 2000));
         assert_eq!(p.page(), 2);
+    }
+
+    #[test]
+    fn snap_to_current_page_does_not_animate() {
+        let t0 = Instant::now();
+        let mut p = Pager::new(3, W);
+        p.snap_to(0, t0);
+        assert_eq!(p.page(), 0);
+        assert!(!p.animating(t0));
+        assert_eq!(p.offset(t0), 0.0);
     }
 
     #[test]

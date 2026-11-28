@@ -1,7 +1,10 @@
 //! App icons for every screen: from the atlas, else from the disk cache,
-//! else asked from Android after the frame (then saved to disk).
+//! else fetched from Android on a background thread (then saved to disk and
+//! uploaded straight to the atlas without blocking drawing).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Condvar, LazyLock, Mutex, OnceLock};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use android_activity::AndroidApp;
@@ -13,13 +16,101 @@ use crate::apps;
 use crate::cache::Store;
 use crate::render::Renderer;
 
+struct IconJobResult {
+    key: AppKey,
+    size: u32,
+    /// `(rgba_pixels, qoi_bytes)` when Android drew the icon; `None` if it couldn't.
+    pixels: Option<(Vec<u8>, Option<Vec<u8>>)>,
+}
+
+struct WorkerState {
+    app: Option<AndroidApp>,
+    store: Option<Store>,
+    size: u32,
+    urgent: VecDeque<AppKey>,
+    prefetch: VecDeque<AppKey>,
+    queued: HashSet<AppKey>,
+    ready: Vec<IconJobResult>,
+}
+
+static WORKER: LazyLock<Mutex<WorkerState>> = LazyLock::new(|| {
+    Mutex::new(WorkerState {
+        app: None,
+        store: None,
+        size: 0,
+        urgent: VecDeque::new(),
+        prefetch: VecDeque::new(),
+        queued: HashSet::new(),
+        ready: Vec::new(),
+    })
+});
+static WORK: Condvar = Condvar::new();
+static STARTED: OnceLock<()> = OnceLock::new();
+
+fn run_worker() {
+    loop {
+        let (app, store, size, key) = {
+            let mut s = WORKER.lock().unwrap();
+            loop {
+                if s.size > 0
+                    && let (Some(app), Some(store)) = (s.app.clone(), s.store.clone())
+                    && let Some(key) = s.urgent.pop_front().or_else(|| s.prefetch.pop_front())
+                {
+                    break (app, store, s.size, key);
+                }
+                s = WORK.wait(s).unwrap();
+            }
+        };
+        let loaded = apps::load_icon_rgba(&app, &key, size as i32);
+        let pixels = loaded.map(|(px, w, _)| {
+            let qoi = Store::encode_icon(w as u32, &px);
+            if let Some(bytes) = qoi.as_deref() {
+                store.save_icon_bytes(&key, bytes);
+            }
+            (px, qoi)
+        });
+        let mut s = WORKER.lock().unwrap();
+        s.queued.remove(&key);
+        if s.size == size {
+            s.ready.push(IconJobResult { key, size, pixels });
+            drop(s);
+            crate::keyboard::wake();
+        }
+    }
+}
+
+fn enqueue_worker(key: &AppKey, size: u32, urgent: bool) {
+    if size == 0 {
+        return;
+    }
+    let mut s = WORKER.lock().unwrap();
+    if s.size != size {
+        return;
+    }
+    if s.queued.insert(key.clone()) {
+        if urgent {
+            s.urgent.push_back(key.clone());
+        } else {
+            s.prefetch.push_back(key.clone());
+        }
+        drop(s);
+        WORK.notify_one();
+    } else if urgent {
+        // Promote a queued background prefetch to urgent when the icon scrolls onto screen.
+        if let Some(pos) = s.prefetch.iter().position(|k| k == key) {
+            let k = s.prefetch.remove(pos).unwrap();
+            s.urgent.push_back(k);
+            drop(s);
+            WORK.notify_one();
+        }
+    }
+}
+
 pub struct Icons {
     store: Store,
     size: u32,
     /// Icons Android couldn't draw; shown as a plain circle, not retried.
     failed: HashSet<AppKey>,
-    /// Icons not on disk yet: fetched from Android after the frame.
-    missing: Vec<AppKey>,
     /// Icons whose app changed: dropped from the atlas next frame.
     stale: Vec<AppKey>,
     /// Cached icon files held compressed in memory (about 20 KB each), read
@@ -42,9 +133,32 @@ fn atlas_key(key: &AppKey) -> String {
 
 impl Icons {
     pub fn new(store: Store) -> Icons {
-        Icons { store, size: 0, failed: HashSet::new(), missing: Vec::new(), stale: Vec::new(),
-            bytes: HashMap::new(), no_file: HashSet::new(), spent: Duration::ZERO, decoded: 0, deferred: false,
-            budget: Duration::from_millis(3) }
+        Icons {
+            store,
+            size: 0,
+            failed: HashSet::new(),
+            stale: Vec::new(),
+            bytes: HashMap::new(),
+            no_file: HashSet::new(),
+            spent: Duration::ZERO,
+            decoded: 0,
+            deferred: false,
+            budget: Duration::from_millis(3),
+        }
+    }
+
+    /// Hand the current activity and store to the background icon worker.
+    pub fn start(&self, app: &AndroidApp) {
+        {
+            let mut s = WORKER.lock().unwrap();
+            s.app = Some(app.clone());
+            s.store = Some(self.store.clone());
+            s.size = self.size;
+        }
+        STARTED.get_or_init(|| {
+            thread::Builder::new().name("icons".into()).spawn(run_worker).expect("icon thread");
+        });
+        WORK.notify_one();
     }
 
     pub fn size(&self) -> u32 {
@@ -56,9 +170,14 @@ impl Icons {
     pub fn set_size(&mut self, px: u32) {
         if px != self.size {
             self.size = px;
-            self.missing.clear();
             self.bytes.clear();
             self.no_file.clear();
+            let mut s = WORKER.lock().unwrap();
+            s.size = px;
+            s.urgent.clear();
+            s.prefetch.clear();
+            s.queued.clear();
+            s.ready.clear();
         }
     }
 
@@ -69,6 +188,8 @@ impl Icons {
         self.bytes.remove(key);
         self.no_file.remove(key);
         self.stale.push(key.clone());
+        let mut s = WORKER.lock().unwrap();
+        s.ready.retain(|item| &item.key != key);
     }
 
     pub fn begin_frame(&mut self, r: &mut Renderer) {
@@ -78,6 +199,40 @@ impl Icons {
         for key in self.stale.drain(..) {
             r.forget_icon(&atlas_key(&key));
         }
+    }
+
+    /// Upload icons finished by the background worker straight into the atlas.
+    /// Returns true if any new icon became ready (so a redraw should show it).
+    pub fn drain_ready(&mut self, gl: &glow::Context, r: &mut Renderer) -> bool {
+        let ready = {
+            let mut s = WORKER.lock().unwrap();
+            if s.ready.is_empty() {
+                return false;
+            }
+            std::mem::take(&mut s.ready)
+        };
+        let mut uploaded = false;
+        for item in ready {
+            if item.size != self.size {
+                continue;
+            }
+            match item.pixels {
+                Some((rgba, qoi)) => {
+                    self.no_file.remove(&item.key);
+                    self.failed.remove(&item.key);
+                    if let Some(bytes) = qoi {
+                        self.bytes.insert(item.key.clone(), bytes);
+                    }
+                    let ak = atlas_key(&item.key);
+                    r.icon(gl, &ak, &rgba, item.size, item.size);
+                    uploaded = true;
+                }
+                None => {
+                    self.failed.insert(item.key);
+                }
+            }
+        }
+        uploaded
     }
 
     fn uv(&mut self, gl: &glow::Context, r: &mut Renderer, key: &AppKey) -> Option<[f32; 4]> {
@@ -103,9 +258,10 @@ impl Icons {
         match loaded {
             Some(_) => uv,
             None => {
-                if !self.missing.contains(key) {
-                    self.missing.push(key.clone());
-                }
+                // Either missing on disk or cached at a different size: fetch asynchronously.
+                self.bytes.remove(key);
+                self.no_file.insert(key.clone());
+                enqueue_worker(key, self.size, true);
                 None
             }
         }
@@ -131,29 +287,6 @@ impl Icons {
         }
     }
 
-    pub fn has_missing(&self) -> bool {
-        !self.missing.is_empty()
-    }
-
-    /// Ask Android for one missing icon and save it. Each takes 10-60 ms,
-    /// so one per call, and only while nothing moves. True if one was tried.
-    pub fn load_missing(&mut self, app: &AndroidApp) -> bool {
-        let Some(key) = self.missing.pop() else { return false };
-        log::info!("icon from Android ({} more waiting)", self.missing.len());
-        match apps::load_icon_rgba(app, &key, self.size as i32) {
-            Some((px, w, _)) => {
-                self.store.save_icon(&key, w as u32, &px);
-                // Any copy held is the old (unusable) file: read the new one.
-                self.bytes.remove(&key);
-                self.no_file.remove(&key);
-            }
-            None => {
-                self.failed.insert(key);
-            }
-        }
-        true
-    }
-
     fn read_file(&mut self, key: &AppKey) {
         match self.store.read_icon(key) {
             Some(b) => {
@@ -166,8 +299,9 @@ impl Icons {
     }
 
     /// A fifth of a refresh suits most phones: 3.3 ms at 60 Hz, 1.7 at 120.
-    pub fn set_frame_budget(&mut self, budget: Duration) {
-        self.budget = budget;
+    /// Returns the previous budget so a caller can temporarily lift it.
+    pub fn set_frame_budget(&mut self, budget: Duration) -> Duration {
+        std::mem::replace(&mut self.budget, budget)
     }
 
     /// True when an icon was left as a placeholder to stay on time.
@@ -194,6 +328,19 @@ impl Icons {
         false
     }
 
+    /// Queue any apps that do not yet have a cached icon on disk so the
+    /// background worker builds them ahead of opening the app list.
+    pub fn prefetch_missing<'a>(&mut self, apps: impl IntoIterator<Item = &'a AppKey>) {
+        if self.size == 0 {
+            return;
+        }
+        for key in apps {
+            if self.no_file.contains(key) && !self.failed.contains(key) {
+                enqueue_worker(key, self.size, false);
+            }
+        }
+    }
+
     /// Put icons into the atlas ahead of being drawn, until `budget` is used
     /// or the atlas has no free slot. True while some are left. Call only
     /// while nothing moves, after `warm` has read their files.
@@ -202,6 +349,8 @@ impl Icons {
             return false;
         }
         let t = Instant::now();
+        let mut wrong_size = Vec::new();
+        let mut more = false;
         for key in apps {
             let ak = atlas_key(key);
             if r.icon_uv(&ak).is_some() || self.failed.contains(key) {
@@ -209,16 +358,27 @@ impl Icons {
             }
             let Some(bytes) = self.bytes.get(key) else { continue };
             if !r.icon_room() {
-                return false;
+                break;
             }
             if t.elapsed() >= budget {
-                return true;
+                more = true;
+                break;
             }
-            if let Some((px, w, h)) = Store::decode_icon(bytes, self.size) {
-                r.icon(gl, &ak, &px, w, h);
+            match Store::decode_icon(bytes, self.size) {
+                Some((px, w, h)) => {
+                    r.icon(gl, &ak, &px, w, h);
+                }
+                None => {
+                    wrong_size.push(key.clone());
+                }
             }
         }
-        false
+        for key in wrong_size {
+            self.bytes.remove(&key);
+            self.no_file.insert(key.clone());
+            enqueue_worker(&key, self.size, false);
+        }
+        more
     }
 
     /// Wait for queued uploads to finish, so the graphics driver can reuse
@@ -228,7 +388,12 @@ impl Icons {
         unsafe { gl.finish() };
     }
 
-    /// Give back the compressed copies; they're read again when needed.
+    /// Drop compressed copies for icons already resident in the GPU atlas.
+    pub fn trim_uploaded(&mut self, r: &mut Renderer) {
+        self.bytes.retain(|k, _| r.icon_uv(&atlas_key(k)).is_none());
+    }
+
+    /// Give back all compressed copies; they're read again when needed.
     pub fn trim(&mut self) {
         self.bytes = HashMap::new();
         self.no_file = HashSet::new();

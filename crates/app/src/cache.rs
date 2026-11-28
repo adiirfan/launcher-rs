@@ -102,14 +102,19 @@ impl Store {
         Some((rgba, size, size))
     }
 
-    pub fn save_icon(&self, key: &AppKey, size: u32, rgba: &[u8]) {
+    pub fn encode_icon(size: u32, rgba: &[u8]) -> Option<Vec<u8>> {
         match qoi::encode_to_vec(rgba, size, size) {
-            Ok(bytes) => {
-                if let Err(e) = write_atomic(&self.icon_path(key), &bytes) {
-                    log::warn!("cache: saving icon failed: {e}");
-                }
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                log::warn!("cache: encoding icon failed: {e}");
+                None
             }
-            Err(e) => log::warn!("cache: encoding icon failed: {e}"),
+        }
+    }
+
+    pub fn save_icon_bytes(&self, key: &AppKey, bytes: &[u8]) {
+        if let Err(e) = write_atomic(&self.icon_path(key), bytes) {
+            log::warn!("cache: saving icon failed: {e}");
         }
     }
 
